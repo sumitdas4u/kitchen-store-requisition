@@ -1,0 +1,13 @@
+{
+  "doctype": "DocType",
+  "name": "Kitchen Master",
+  "module": "Custom",
+  "fields": [
+    { "fieldname": "kitchen_name", "fieldtype": "Data", "reqd": 1 },
+    { "fieldname": "warehouse", "fieldtype": "Link", "options": "Warehouse", "reqd": 1 },
+    { "fieldname": "source_warehouse", "fieldtype": "Link", "options": "Warehouse", "reqd": 1 },
+    { "fieldname": "item_groups", "fieldtype": "Table", "options": "Kitchen Item Group" },
+    { "fieldname": "whatsapp_numbers", "fieldtype": "Small Text" },
+    { "fieldname": "is_active", "fieldtype": "Check", "default": "1" }
+  ]
+}

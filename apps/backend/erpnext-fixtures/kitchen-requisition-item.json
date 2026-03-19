@@ -1,0 +1,21 @@
+{
+  "doctype": "DocType",
+  "name": "Kitchen Requisition Item",
+  "istable": 1,
+  "module": "Custom",
+  "fields": [
+    { "fieldname": "item_code", "fieldtype": "Link", "options": "Item", "reqd": 1 },
+    { "fieldname": "item_name", "fieldtype": "Data" },
+    { "fieldname": "uom", "fieldtype": "Link", "options": "UOM" },
+    { "fieldname": "closing_stock", "fieldtype": "Float", "read_only": 1 },
+    { "fieldname": "required_qty", "fieldtype": "Float" },
+    { "fieldname": "requested_qty", "fieldtype": "Float" },
+    { "fieldname": "issued_qty", "fieldtype": "Float" },
+    { "fieldname": "received_qty", "fieldtype": "Float" },
+    {
+      "fieldname": "item_status",
+      "fieldtype": "Select",
+      "options": "Pending\nIssued\nPartially Issued\nRejected"
+    }
+  ]
+}

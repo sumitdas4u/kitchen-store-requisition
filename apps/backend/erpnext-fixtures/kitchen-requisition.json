@@ -1,0 +1,24 @@
+{
+  "doctype": "DocType",
+  "name": "Kitchen Requisition",
+  "module": "Custom",
+  "fields": [
+    { "fieldname": "kitchen", "fieldtype": "Link", "options": "Kitchen Master", "reqd": 1 },
+    { "fieldname": "requested_date", "fieldtype": "Date", "reqd": 1 },
+    { "fieldname": "shift", "fieldtype": "Select", "options": "Morning\nEvening", "reqd": 1 },
+    {
+      "fieldname": "status",
+      "fieldtype": "Select",
+      "options": "Draft\nSubmitted\nPartially Issued\nIssued\nDisputed\nCompleted\nRejected",
+      "default": "Draft"
+    },
+    { "fieldname": "created_by", "fieldtype": "Link", "options": "User" },
+    { "fieldname": "submitted_at", "fieldtype": "Datetime" },
+    { "fieldname": "issued_at", "fieldtype": "Datetime" },
+    { "fieldname": "completed_at", "fieldtype": "Datetime" },
+    { "fieldname": "stock_entry", "fieldtype": "Link", "options": "Stock Entry" },
+    { "fieldname": "queue_job_id", "fieldtype": "Data" },
+    { "fieldname": "notes", "fieldtype": "Text" },
+    { "fieldname": "items", "fieldtype": "Table", "options": "Kitchen Requisition Item" }
+  ]
+}
