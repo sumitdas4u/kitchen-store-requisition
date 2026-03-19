@@ -678,24 +678,56 @@ export class StoreService implements OnModuleInit {
   }
 
   async createPurchaseReceipt(user: { user_id: number }, dto: CreatePurchaseReceiptDto) {
-    if (!dto?.po_id || !dto.vendor_id || !dto.lines?.length) throw new BadRequestException('po_id, vendor_id and lines are required')
-    const po = await this.erpService.getPurchaseOrder(dto.po_id)
-    const poItemMap = new Map<string, any>()
-    ;(Array.isArray((po as any).items) ? (po as any).items : []).forEach((r: any) => { if (r.item_code) poItemMap.set(String(r.item_code), r) })
-    const payload = {
-      supplier: dto.vendor_id, purchase_order: dto.po_id,
-      items: dto.lines.map((line) => {
-        const pi = poItemMap.get(line.item_code)
-        return { item_code: line.item_code, item_name: line.item_name ?? pi?.item_name, uom: line.uom ?? pi?.uom, qty: Number(line.qty), purchase_order: dto.po_id, purchase_order_item: pi?.name }
-      })
+    if (!dto.vendor_id || !dto.lines?.length) throw new BadRequestException('vendor_id and lines are required')
+
+    let payload: Record<string, unknown>
+
+    if (dto.po_id) {
+      // ── With PO: fetch PO items for cross-referencing ──
+      const po = await this.erpService.getPurchaseOrder(dto.po_id)
+      const poItemMap = new Map<string, any>()
+      ;(Array.isArray((po as any).items) ? (po as any).items : []).forEach((r: any) => { if (r.item_code) poItemMap.set(String(r.item_code), r) })
+      payload = {
+        supplier: dto.vendor_id, purchase_order: dto.po_id,
+        items: dto.lines.map((line) => {
+          const pi = poItemMap.get(line.item_code)
+          return { item_code: line.item_code, item_name: line.item_name ?? pi?.item_name, uom: line.uom ?? pi?.uom, qty: Number(line.qty), purchase_order: dto.po_id, purchase_order_item: pi?.name }
+        })
+      }
+    } else {
+      // ── Without PO: direct receipt ──
+      payload = {
+        supplier: dto.vendor_id,
+        items: dto.lines.map((line) => ({
+          item_code: line.item_code,
+          item_name: line.item_name,
+          uom: line.uom,
+          qty: Number(line.qty)
+        }))
+      }
     }
+
     const receiptId = await this.erpService.createPurchaseReceipt(payload)
     await this.erpService.submitPurchaseReceipt(receiptId)
     const receipt = this.vendorReceiptRepo.create({
-      vendor_id: dto.vendor_id, vendor_name: dto.vendor_name ?? null, po_id: dto.po_id, receipt_id: receiptId, created_by: user.user_id,
+      vendor_id: dto.vendor_id, vendor_name: dto.vendor_name ?? null, po_id: dto.po_id || 'DIRECT', receipt_id: receiptId, created_by: user.user_id,
       lines: dto.lines.map((l) => this.vendorReceiptLineRepo.create({ item_code: l.item_code, item_name: l.item_name ?? null, uom: l.uom ?? null, qty: Number(l.qty) }))
     })
     await this.vendorReceiptRepo.save(receipt)
     return { receipt_id: receiptId }
+  }
+
+  async uploadReceiptPhotos(receiptId: string, files: Express.Multer.File[]) {
+    const urls: string[] = []
+    for (const file of files) {
+      const result = await this.erpService.uploadFile(
+        file.buffer,
+        file.originalname,
+        'Purchase Receipt',
+        receiptId
+      )
+      if (result.file_url) urls.push(result.file_url)
+    }
+    return { uploaded: urls.length, urls }
   }
 }

@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
-import { apiRequest } from '../../../lib/api';
+import { apiRequest, apiUploadFiles } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
+import { compressImage } from '../../../lib/image-utils';
 
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&family=DM+Mono:wght@500;600&display=swap');
@@ -33,6 +34,16 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 .rbody{padding:12px 12px}
 .sec-title{font-size:10px;font-weight:800;color:var(--lt);text-transform:uppercase;letter-spacing:.07em;padding:10px 2px 8px}
 
+/* Mode cards (landing) */
+.mode-cards{display:flex;flex-direction:column;gap:12px;padding-top:8px}
+.mode-card{background:var(--wh);border-radius:16px;padding:20px 18px;display:flex;align-items:center;gap:16px;
+  box-shadow:0 1px 4px rgba(0,0,0,.07);cursor:pointer;border:2px solid transparent}
+.mode-card:active{border-color:var(--or);background:var(--orl)}
+.mode-card-icon{font-size:36px;flex-shrink:0}
+.mode-card-title{font-size:15px;font-weight:900;color:var(--dk)}
+.mode-card-desc{font-size:12px;font-weight:700;color:var(--md);margin-top:3px}
+.mode-card-arrow{margin-left:auto;font-size:18px;color:var(--or);font-weight:900;flex-shrink:0}
+
 /* PO list */
 .po-card{background:var(--wh);border-radius:14px;overflow:hidden;
   box-shadow:0 1px 4px rgba(0,0,0,.07);margin-bottom:10px;cursor:pointer}
@@ -44,6 +55,40 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 .po-body{padding:10px 14px;display:flex;align-items:center;justify-content:space-between}
 .po-items-count{font-size:12px;font-weight:800;color:var(--md)}
 .po-arrow{font-size:16px;color:var(--or);font-weight:900}
+
+/* Vendor list (direct mode) */
+.vendor-search{display:flex;align-items:center;gap:8px;background:var(--wh);border-radius:12px;
+  padding:0 12px;margin-bottom:12px;border:1.5px solid var(--ln)}
+.vendor-search:focus-within{border-color:var(--or)}
+.vendor-search-icon{font-size:16px;color:var(--lt);flex-shrink:0}
+.vendor-search input{flex:1;border:none;background:none;padding:12px 0;
+  font-family:'Nunito',sans-serif;font-size:14px;font-weight:700;color:var(--dk);outline:none}
+.vendor-search input::placeholder{color:var(--lt)}
+.vendor-row{background:var(--wh);border-radius:12px;padding:13px 14px;margin-bottom:8px;
+  display:flex;align-items:center;gap:10px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.vendor-row:active{background:var(--orl)}
+.vendor-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.vendor-name{flex:1;font-size:13px;font-weight:800;color:var(--dk)}
+.vendor-arrow{font-size:14px;color:var(--lt)}
+
+/* Item search (direct mode) */
+.item-search-wrap{position:relative;margin-bottom:12px}
+.item-search{display:flex;align-items:center;gap:8px;background:var(--wh);border-radius:12px;
+  padding:0 12px;border:1.5px solid var(--ln)}
+.item-search:focus-within{border-color:var(--or)}
+.item-search input{flex:1;border:none;background:none;padding:12px 0;
+  font-family:'Nunito',sans-serif;font-size:14px;font-weight:700;color:var(--dk);outline:none}
+.item-search input::placeholder{color:var(--lt)}
+.search-results{background:var(--wh);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.12);
+  max-height:260px;overflow-y:auto;margin-bottom:12px}
+.search-item{padding:11px 14px;border-bottom:1px solid var(--lnlt);display:flex;align-items:center;gap:10px;cursor:pointer}
+.search-item:last-child{border-bottom:none}
+.search-item:active{background:var(--orl)}
+.search-item-info{flex:1}
+.search-item-name{font-size:13px;font-weight:800;color:var(--dk)}
+.search-item-code{font-size:10px;font-weight:700;color:var(--lt);font-family:'DM Mono',monospace;margin-top:1px}
+.search-item-add{width:32px;height:32px;border-radius:50%;background:var(--or);color:#fff;border:none;
+  font-size:20px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 
 /* Receipt items */
 .receipt-hdr{background:var(--wh);border-radius:14px;overflow:hidden;
@@ -62,6 +107,8 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 .lc-hdr{padding:11px 14px;border-bottom:1px solid var(--lnlt);display:flex;align-items:center;gap:8px}
 .lc-name{flex:1;font-size:13px;font-weight:900;color:var(--dk)}
 .lc-code{font-size:10px;font-weight:700;color:var(--lt);font-family:'DM Mono',monospace}
+.lc-remove{width:24px;height:24px;border-radius:50%;background:var(--rdbg);color:var(--rd);border:none;
+  font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .lc-body{padding:10px 14px;display:flex;align-items:center;gap:10px}
 .lc-ordered{font-size:11px;font-weight:800;color:var(--md);flex:1}
 .lc-ordered span{color:var(--bl);font-family:'DM Mono',monospace}
@@ -76,6 +123,23 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 .qty-inp:focus{outline:none}
 .qty-inp::-webkit-inner-spin-button{-webkit-appearance:none}
 .qty-unit{font-size:10px;font-weight:800;color:var(--lt);flex-shrink:0}
+
+/* Photo section */
+.photo-section{background:var(--wh);border-radius:14px;overflow:hidden;
+  box-shadow:0 1px 4px rgba(0,0,0,.07);margin-bottom:10px;padding:14px}
+.photo-title{font-size:11px;font-weight:800;color:var(--md);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.photo-grid{display:flex;flex-wrap:wrap;gap:8px}
+.photo-thumb{width:72px;height:72px;border-radius:10px;overflow:hidden;position:relative;border:1.5px solid var(--ln)}
+.photo-thumb img{width:100%;height:100%;object-fit:cover}
+.photo-thumb-del{position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;
+  background:rgba(0,0,0,.6);color:#fff;border:none;font-size:12px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center}
+.photo-add-btn{width:72px;height:72px;border-radius:10px;border:2px dashed var(--ln);
+  background:var(--lnlt);cursor:pointer;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:2px;color:var(--lt)}
+.photo-add-btn:active{border-color:var(--or);color:var(--or)}
+.photo-add-icon{font-size:22px}
+.photo-add-label{font-size:8px;font-weight:800;text-transform:uppercase}
 
 /* Bottom nav */
 .bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);
@@ -100,6 +164,9 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
   border-radius:13px;cursor:pointer;font-family:'Nunito',sans-serif;font-size:14px;font-weight:900}
 .rbbar-confirm:disabled{background:#D1D5DB;cursor:not-allowed}
 .rbbar-confirm:not(:disabled):active{background:#15803D}
+.rbbar-continue{flex:1;padding:13px;background:var(--or);color:#fff;border:none;
+  border-radius:13px;cursor:pointer;font-family:'Nunito',sans-serif;font-size:14px;font-weight:900}
+.rbbar-continue:disabled{background:#D1D5DB;cursor:not-allowed}
 
 /* Success */
 .success-overlay{position:fixed;inset:0;background:rgba(17,24,39,.75);z-index:100;
@@ -118,10 +185,23 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
   border:2px solid var(--ln);border-radius:13px;font-family:'Nunito',sans-serif;font-size:13px;
   font-weight:800;cursor:pointer;width:calc(100% - 36px)}
 
+/* Uploading indicator */
+.upload-bar{background:var(--blbg);border:1.5px solid var(--blbr);border-radius:12px;
+  padding:10px 14px;margin:0 18px 12px;display:flex;align-items:center;gap:8px}
+.upload-bar-text{font-size:12px;font-weight:800;color:var(--bl);flex:1}
+
 @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
 .anim-up{animation:slideUp .25s cubic-bezier(.34,1.2,.64,1)}
 @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 .fade{animation:fadeUp .18s ease both}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--blbr);border-top-color:var(--bl);border-radius:50%;animation:spin .6s linear infinite}
+
+/* Empty state */
+.empty{text-align:center;padding:48px 20px;color:#9CA3AF}
+.empty-icon{font-size:44px;margin-bottom:12px}
+.empty-title{font-size:14px;font-weight:800}
+.empty-desc{font-size:12px;margin-top:6px}
 `;
 
 interface PoRow {
@@ -131,20 +211,24 @@ interface PoRow {
   erp: any | null;
 }
 interface ReceiptLine { item_code: string; item_name?: string; uom?: string; qty: number; ordered?: number }
+interface Vendor { name: string; supplier_name?: string }
+interface SearchItem { name: string; item_name: string; stock_uom?: string }
+
+type Mode = 'landing' | 'po_select' | 'direct_vendor' | 'direct_items' | 'confirm';
 
 const COLORS = ['#16A34A','#F97316','#EF4444','#0EA5E9','#8B5CF6','#1D4ED8','#DB2777'];
 const getColor = (s: string) => COLORS[Math.abs((s||'').split('').reduce((a,c)=>a+c.charCodeAt(0),0)) % COLORS.length];
 const n3 = (v: number) => parseFloat(Number(v).toFixed(3));
-const inr = (n: number) => `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits:0 })}`;
+const inr = (n: number) => `\u20B9${Number(n).toLocaleString('en-IN', { maximumFractionDigits:0 })}`;
 
 function BottomNav() {
   const pathname = usePathname();
   const router   = useRouter();
   const items = [
-    { icon: '🏠', label: 'Home',      path: '/store' },
-    { icon: '📦', label: 'Transfers', path: '/store/transfers' },
-    { icon: '🛒', label: 'Orders',    path: '/store/vendor-orders' },
-    { icon: '📋', label: 'Receipts',  path: '/store/purchase-receipts' },
+    { icon: '\uD83C\uDFE0', label: 'Home',      path: '/store' },
+    { icon: '\uD83D\uDCE6', label: 'Transfers', path: '/store/transfers' },
+    { icon: '\uD83D\uDED2', label: 'Orders',    path: '/store/vendor-orders' },
+    { icon: '\uD83D\uDCCB', label: 'Receipts',  path: '/store/purchase-receipts' },
   ];
   return (
     <nav className="bnav">
@@ -160,16 +244,41 @@ function BottomNav() {
 }
 
 export function PurchaseReceipts() {
-  const router   = useRouter();
-  const token    = useAuthGuard('/store/login');
-  const [openPos,  setOpenPos ] = useState<PoRow[]>([]);
+  const router = useRouter();
+  const token  = useAuthGuard('/store/login');
+
+  // ── State ──
+  const [mode, setMode] = useState<Mode>('landing');
+  const [openPos, setOpenPos] = useState<PoRow[]>([]);
+  const [fetchingPos, setFetchingPos] = useState(false);
+
+  // PO mode
   const [selected, setSelected] = useState<PoRow | null>(null);
-  const [lines,    setLines   ] = useState<ReceiptLine[]>([]);
-  const [loading,  setLoading ] = useState(false);
-  const [fetchingPos, setFetchingPos] = useState(true);
+
+  // Direct mode
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [vendorSearch, setVendorSearch] = useState('');
+  const [selectedVendor, setSelectedVendor] = useState<Vendor | null>(null);
+  const [itemQuery, setItemQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchItem[]>([]);
+  const [searching, setSearching] = useState(false);
+
+  // Shared confirm state
+  const [lines, setLines] = useState<ReceiptLine[]>([]);
+  const [loading, setLoading] = useState(false);
   const [successId, setSuccessId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Photos
+  const [itemPhotos, setItemPhotos] = useState<File[]>([]);
+  const [itemPreviews, setItemPreviews] = useState<string[]>([]);
+  const [billPhoto, setBillPhoto] = useState<File | null>(null);
+  const [billPreview, setBillPreview] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const itemPhotoRef = useRef<HTMLInputElement>(null);
+  const billPhotoRef = useRef<HTMLInputElement>(null);
+
+  // ── Data loading ──
   const loadOpenPos = () => {
     if (!token) return;
     setFetchingPos(true);
@@ -178,10 +287,36 @@ export function PurchaseReceipts() {
       .catch(() => { setOpenPos([]); setFetchingPos(false); });
   };
 
-  useEffect(() => { loadOpenPos(); }, [token]);
+  const loadVendors = () => {
+    if (!token) return;
+    apiRequest<{ suppliers: Vendor[] }>('/store/vendor-order/vendors', 'GET', undefined, token)
+      .then(d => setVendors(d?.suppliers || []))
+      .catch(() => setVendors([]));
+  };
 
   useEffect(() => {
-    if (!selected) { setLines([]); return; }
+    if (mode === 'po_select') loadOpenPos();
+    if (mode === 'direct_vendor') loadVendors();
+  }, [mode, token]);
+
+  // Item search with debounce
+  useEffect(() => {
+    if (mode !== 'direct_items' || !token || itemQuery.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+    setSearching(true);
+    const timer = setTimeout(() => {
+      apiRequest<SearchItem[]>(`/store/vendor-order/items?q=${encodeURIComponent(itemQuery)}`, 'GET', undefined, token)
+        .then(d => { setSearchResults(d || []); setSearching(false); })
+        .catch(() => { setSearchResults([]); setSearching(false); });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [itemQuery, mode, token]);
+
+  // PO selection -> populate lines
+  useEffect(() => {
+    if (!selected) return;
     const items = Array.isArray(selected.erp?.items) ? selected.erp.items : [];
     setLines(items.map((item: any) => {
       const ordered   = Number(item.qty || 0);
@@ -189,33 +324,138 @@ export function PurchaseReceipts() {
       const remaining = Math.max(0, ordered - received);
       return { item_code: item.item_code, item_name: item.item_name, uom: item.uom, qty: remaining > 0 ? remaining : ordered, ordered };
     }));
+    setMode('confirm');
   }, [selected]);
 
-  const grandTotal = useMemo(
-    () => lines.reduce((s, l) => s + l.qty, 0),
-    [lines]
-  );
+  // ── Computed ──
+  const grandTotal = useMemo(() => lines.reduce((s, l) => s + l.qty, 0), [lines]);
+  const vendorId   = selected?.vendor_id || selectedVendor?.name || '';
+  const vendorName = selected?.vendor_name || selectedVendor?.supplier_name || selectedVendor?.name || '';
+  const poId       = selected?.po_id;
+  const filteredVendors = useMemo(() => {
+    if (!vendorSearch.trim()) return vendors;
+    const q = vendorSearch.toLowerCase();
+    return vendors.filter(v =>
+      (v.supplier_name || v.name || '').toLowerCase().includes(q)
+    );
+  }, [vendors, vendorSearch]);
+
+  // ── Helpers ──
+  const setLineQty = (code: string, qty: number) =>
+    setLines(prev => prev.map(l => l.item_code === code ? { ...l, qty: Math.max(0, n3(qty)) } : l));
+
+  const removeLine = (code: string) =>
+    setLines(prev => prev.filter(l => l.item_code !== code));
+
+  const addItem = (item: SearchItem) => {
+    if (lines.some(l => l.item_code === item.name)) return;
+    setLines(prev => [...prev, { item_code: item.name, item_name: item.item_name, uom: item.stock_uom || 'Nos', qty: 1 }]);
+    setItemQuery('');
+    setSearchResults([]);
+  };
+
+  const handleItemPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    const compressed = await compressImage(file);
+    setItemPhotos(prev => [...prev, compressed]);
+    setItemPreviews(prev => [...prev, URL.createObjectURL(compressed)]);
+  };
+
+  const removeItemPhoto = (idx: number) => {
+    URL.revokeObjectURL(itemPreviews[idx]);
+    setItemPhotos(prev => prev.filter((_, i) => i !== idx));
+    setItemPreviews(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleBillPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    const compressed = await compressImage(file);
+    if (billPreview) URL.revokeObjectURL(billPreview);
+    setBillPhoto(compressed);
+    setBillPreview(URL.createObjectURL(compressed));
+  };
+
+  const removeBillPhoto = () => {
+    if (billPreview) URL.revokeObjectURL(billPreview);
+    setBillPhoto(null);
+    setBillPreview(null);
+  };
+
+  const resetAll = () => {
+    setMode('landing');
+    setSelected(null);
+    setSelectedVendor(null);
+    setLines([]);
+    setItemQuery('');
+    setSearchResults([]);
+    setError(null);
+    itemPreviews.forEach(u => URL.revokeObjectURL(u));
+    if (billPreview) URL.revokeObjectURL(billPreview);
+    setItemPhotos([]);
+    setItemPreviews([]);
+    setBillPhoto(null);
+    setBillPreview(null);
+    setUploading(false);
+  };
+
+  const goBack = () => {
+    if (mode === 'confirm' && !selected) { setMode('direct_items'); return; }
+    if (mode === 'confirm') { setSelected(null); setLines([]); setMode('po_select'); return; }
+    if (mode === 'direct_items') { setMode('direct_vendor'); return; }
+    if (mode === 'po_select' || mode === 'direct_vendor') { resetAll(); return; }
+    router.push('/store');
+  };
 
   const handleSubmit = async () => {
-    if (!token || !selected) return;
+    if (!token) return;
     setLoading(true);
     setError(null);
     try {
       const res = await apiRequest<{ receipt_id: string }>(
         '/store/purchase-receipts/create', 'POST',
-        { po_id: selected.po_id, vendor_id: selected.vendor_id, vendor_name: selected.vendor_name, lines: lines.map(l => ({ item_code: l.item_code, item_name: l.item_name, uom: l.uom, qty: Number(l.qty || 0) })) },
+        {
+          ...(poId ? { po_id: poId } : {}),
+          vendor_id: vendorId,
+          vendor_name: vendorName,
+          lines: lines.map(l => ({ item_code: l.item_code, item_name: l.item_name, uom: l.uom, qty: Number(l.qty || 0) }))
+        },
         token
       );
       setSuccessId(res?.receipt_id || 'Created');
-      setSelected(null); setLines([]);
-      loadOpenPos();
+
+      // Upload photos in background (non-blocking)
+      const allPhotos = [...itemPhotos, ...(billPhoto ? [billPhoto] : [])];
+      if (allPhotos.length > 0 && res?.receipt_id) {
+        setUploading(true);
+        apiUploadFiles(`/store/purchase-receipts/${res.receipt_id}/upload`, allPhotos, token)
+          .catch(() => {})
+          .finally(() => setUploading(false));
+      }
     } catch (err: any) {
       setError(err?.message || 'Failed to create receipt. Please try again.');
     } finally { setLoading(false); }
   };
 
-  const setLineQty = (code: string, qty: number) =>
-    setLines(prev => prev.map(l => l.item_code === code ? { ...l, qty: Math.max(0, n3(qty)) } : l));
+  // ── Header config ──
+  const headerTitle = (() => {
+    if (mode === 'po_select') return 'Select Purchase Order';
+    if (mode === 'direct_vendor') return 'Select Supplier';
+    if (mode === 'direct_items') return 'Add Items';
+    if (mode === 'confirm') return 'Confirm Receipt';
+    return 'Purchase Receipts';
+  })();
+
+  const headerSub = (() => {
+    if (mode === 'po_select') return `${openPos.length} open POs`;
+    if (mode === 'direct_vendor') return `${vendors.length} suppliers`;
+    if (mode === 'direct_items') return `${vendorName} \u00B7 ${lines.length} items`;
+    if (mode === 'confirm') return `${vendorName} \u00B7 ${lines.length} items`;
+    return 'Receive goods into warehouse';
+  })();
 
   if (!token) return null;
 
@@ -223,21 +463,27 @@ export function PurchaseReceipts() {
     <div className="rpage">
       <style>{CSS}</style>
 
-      {/* Success overlay */}
+      {/* ── Success overlay ── */}
       {successId && (
         <div className="success-overlay">
           <div className="success-sheet anim-up">
             <div className="success-handle"/>
-            <div className="success-icon">📋</div>
+            <div className="success-icon">{'\uD83D\uDCCB'}</div>
             <div className="success-title">Receipt Created!</div>
             <div className="success-sub">Purchase receipt submitted to ERPNext</div>
+            {uploading && (
+              <div className="upload-bar">
+                <span className="spinner"/>
+                <span className="upload-bar-text">Uploading photos...</span>
+              </div>
+            )}
             <div className="success-id-box">
               <div style={{ fontSize:11, fontWeight:800, color:'var(--lt)', marginBottom:4 }}>Receipt ID</div>
               <div className="success-id">{successId}</div>
             </div>
             <button className="success-done-btn" style={{ width:'calc(100% - 36px)' }}
-              onClick={() => { setSuccessId(null); }}>
-              ✓ Done — Receive Another
+              onClick={() => { setSuccessId(null); resetAll(); }}>
+              {'\u2713'} Done — Receive Another
             </button>
             <button className="success-more-btn" style={{ width:'calc(100% - 36px)' }}
               onClick={() => router.push('/store')}>
@@ -247,46 +493,62 @@ export function PurchaseReceipts() {
         </div>
       )}
 
-      {/* Header */}
+      {/* ── Header ── */}
       <div className="rhdr">
         <div className="rhdr-row">
-          <button className="rhdr-back" onClick={() => selected ? setSelected(null) : router.push('/store')}>←</button>
+          <button className="rhdr-back" onClick={goBack}>{'\u2190'}</button>
           <div>
-            <div className="rhdr-title">{selected ? 'Confirm Receipt' : 'Purchase Receipts'}</div>
-            <div className="rhdr-sub">
-              {selected
-                ? `${selected.vendor_name || selected.vendor_id} · ${lines.length} items`
-                : `${openPos.length} open POs`}
-            </div>
+            <div className="rhdr-title">{headerTitle}</div>
+            <div className="rhdr-sub">{headerSub}</div>
           </div>
         </div>
       </div>
 
       <div className="rbody">
-        {/* PO selection list */}
-        {!selected && (
+
+        {/* ══════════ LANDING ══════════ */}
+        {mode === 'landing' && (
+          <div className="mode-cards fade">
+            <div className="mode-card" onClick={() => setMode('po_select')}>
+              <div className="mode-card-icon">{'\uD83D\uDCE5'}</div>
+              <div>
+                <div className="mode-card-title">Receive Against PO</div>
+                <div className="mode-card-desc">Select an open purchase order to receive items</div>
+              </div>
+              <div className="mode-card-arrow">{'\u2192'}</div>
+            </div>
+            <div className="mode-card" onClick={() => setMode('direct_vendor')}>
+              <div className="mode-card-icon">{'\uD83D\uDCDD'}</div>
+              <div>
+                <div className="mode-card-title">Direct Receipt (No PO)</div>
+                <div className="mode-card-desc">Create a receipt without a purchase order</div>
+              </div>
+              <div className="mode-card-arrow">{'\u2192'}</div>
+            </div>
+          </div>
+        )}
+
+        {/* ══════════ PO SELECTION ══════════ */}
+        {mode === 'po_select' && (
           <>
             <div className="sec-title">Open Purchase Orders</div>
-
             {fetchingPos && (
-              <div style={{ textAlign:'center', padding:'48px 20px', color:'#9CA3AF' }}>
-                <div style={{ fontSize:36, marginBottom:12 }}>⏳</div>
-                <div style={{ fontSize:13, fontWeight:800 }}>Loading open POs...</div>
+              <div className="empty">
+                <div className="empty-icon">{'\u23F3'}</div>
+                <div className="empty-title">Loading open POs...</div>
               </div>
             )}
-
             {!fetchingPos && openPos.length === 0 && (
-              <div style={{ textAlign:'center', padding:'48px 20px', color:'#9CA3AF' }}>
-                <div style={{ fontSize:44, marginBottom:12 }}>📭</div>
-                <div style={{ fontSize:14, fontWeight:800 }}>No open purchase orders</div>
-                <div style={{ fontSize:12, marginTop:6 }}>Create a vendor order first to receive items</div>
+              <div className="empty">
+                <div className="empty-icon">{'\uD83D\uDCED'}</div>
+                <div className="empty-title">No open purchase orders</div>
+                <div className="empty-desc">Create a vendor order first to receive items</div>
               </div>
             )}
-
-            {openPos.map((po, i) => {
-              const color   = getColor(po.vendor_id);
-              const items   = Array.isArray(po.erp?.items) ? po.erp.items : [];
-              const total   = po.erp?.grand_total ? inr(po.erp.grand_total) : `${items.length} items`;
+            {openPos.map(po => {
+              const color = getColor(po.vendor_id);
+              const items = Array.isArray(po.erp?.items) ? po.erp.items : [];
+              const total = po.erp?.grand_total ? inr(po.erp.grand_total) : `${items.length} items`;
               return (
                 <div key={po.po_id} className="po-card fade" onClick={() => setSelected(po)}>
                   <div className="po-hdr" style={{ background: color }}>
@@ -295,8 +557,8 @@ export function PurchaseReceipts() {
                     <div className="po-hdr-id">{po.po_id}</div>
                   </div>
                   <div className="po-body">
-                    <div className="po-items-count">{items.length} items · {total}</div>
-                    <div className="po-arrow">Receive →</div>
+                    <div className="po-items-count">{items.length} items {'\u00B7'} {total}</div>
+                    <div className="po-arrow">Receive {'\u2192'}</div>
                   </div>
                 </div>
               );
@@ -304,15 +566,101 @@ export function PurchaseReceipts() {
           </>
         )}
 
-        {/* Receipt entry */}
-        {selected && (
+        {/* ══════════ DIRECT: VENDOR SELECTION ══════════ */}
+        {mode === 'direct_vendor' && (
+          <>
+            <div className="sec-title">Select Supplier</div>
+            <div className="vendor-search">
+              <span className="vendor-search-icon">{'\uD83D\uDD0D'}</span>
+              <input placeholder="Search suppliers..." value={vendorSearch}
+                onChange={e => setVendorSearch(e.target.value)} autoFocus />
+            </div>
+            {filteredVendors.length === 0 && (
+              <div className="empty">
+                <div className="empty-icon">{'\uD83D\uDCED'}</div>
+                <div className="empty-title">No suppliers found</div>
+              </div>
+            )}
+            {filteredVendors.map(v => (
+              <div key={v.name} className="vendor-row fade"
+                onClick={() => { setSelectedVendor(v); setMode('direct_items'); }}>
+                <div className="vendor-dot" style={{ background: getColor(v.name) }}/>
+                <div className="vendor-name">{v.supplier_name || v.name}</div>
+                <div className="vendor-arrow">{'\u203A'}</div>
+              </div>
+            ))}
+          </>
+        )}
+
+        {/* ══════════ DIRECT: ITEM SEARCH & ADD ══════════ */}
+        {mode === 'direct_items' && (
+          <>
+            <div className="sec-title">Search & Add Items</div>
+            <div className="item-search">
+              <span style={{ fontSize:16, color:'var(--lt)' }}>{'\uD83D\uDD0D'}</span>
+              <input placeholder="Search items..." value={itemQuery}
+                onChange={e => setItemQuery(e.target.value)} autoFocus />
+              {searching && <span className="spinner"/>}
+            </div>
+
+            {searchResults.length > 0 && (
+              <div className="search-results">
+                {searchResults.map(item => (
+                  <div key={item.name} className="search-item" onClick={() => addItem(item)}>
+                    <div className="search-item-info">
+                      <div className="search-item-name">{item.item_name}</div>
+                      <div className="search-item-code">{item.name} {'\u00B7'} {item.stock_uom}</div>
+                    </div>
+                    {!lines.some(l => l.item_code === item.name) && (
+                      <button className="search-item-add">+</button>
+                    )}
+                    {lines.some(l => l.item_code === item.name) && (
+                      <span style={{ fontSize:11, fontWeight:800, color:'var(--gn)' }}>{'\u2713'} Added</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {lines.length > 0 && (
+              <>
+                <div className="sec-title">Added Items ({lines.length})</div>
+                {lines.map(line => (
+                  <div key={line.item_code} className="line-card fade">
+                    <div className="lc-hdr">
+                      <div className="lc-name">{line.item_name || line.item_code}</div>
+                      <button className="lc-remove" onClick={() => removeLine(line.item_code)}>{'\u2715'}</button>
+                    </div>
+                    <div className="lc-body">
+                      <span className="qty-unit" style={{ fontSize:11 }}>{line.uom}</span>
+                      <div className="qty-ctrl">
+                        <button className="qty-btn"
+                          onPointerDown={e => { e.preventDefault(); setLineQty(line.item_code, line.qty - 0.5); }}>{'\u2212'}</button>
+                        <input className="qty-inp" type="number" inputMode="decimal" step="any"
+                          value={line.qty}
+                          onChange={e => setLineQty(line.item_code, parseFloat(e.target.value) || 0)}
+                          onFocus={e => e.target.select()} />
+                        <button className="qty-btn add"
+                          onPointerDown={e => { e.preventDefault(); setLineQty(line.item_code, line.qty + 0.5); }}>+</button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+          </>
+        )}
+
+        {/* ══════════ CONFIRM RECEIPT ══════════ */}
+        {mode === 'confirm' && (
           <>
             {/* Vendor summary card */}
             <div className="receipt-hdr fade">
-              <div className="rh-vendor" style={{ background: getColor(selected.vendor_id) }}>
+              <div className="rh-vendor" style={{ background: getColor(vendorId) }}>
                 <div style={{ width:10, height:10, borderRadius:'50%', background:'rgba(255,255,255,.4)', flexShrink:0 }}/>
-                <div className="rh-vendor-name">{selected.vendor_name || selected.vendor_id}</div>
-                <div className="rh-vendor-po">{selected.po_id}</div>
+                <div className="rh-vendor-name">{vendorName || vendorId}</div>
+                {poId && <div className="rh-vendor-po">{poId}</div>}
+                {!poId && <div className="rh-vendor-po">DIRECT</div>}
               </div>
               <div className="rh-stats">
                 <div className="rh-stat">
@@ -323,7 +671,7 @@ export function PurchaseReceipts() {
                   <span className="rh-stat-val">{grandTotal.toFixed(1)}</span>
                   <span className="rh-stat-lbl">Total Qty</span>
                 </div>
-                {selected.erp?.grand_total && (
+                {selected?.erp?.grand_total && (
                   <div className="rh-stat">
                     <span className="rh-stat-val" style={{ fontSize:14 }}>{inr(selected.erp.grand_total)}</span>
                     <span className="rh-stat-lbl">Order Value</span>
@@ -340,12 +688,17 @@ export function PurchaseReceipts() {
                   <div className="lc-code">{line.item_code}</div>
                 </div>
                 <div className="lc-body">
-                  <div className="lc-ordered">
-                    Ordered: <span>{line.ordered ?? line.qty} {line.uom}</span>
-                  </div>
+                  {line.ordered != null && (
+                    <div className="lc-ordered">
+                      Ordered: <span>{line.ordered} {line.uom}</span>
+                    </div>
+                  )}
+                  {line.ordered == null && (
+                    <span className="qty-unit" style={{ fontSize:11 }}>{line.uom}</span>
+                  )}
                   <div className="qty-ctrl">
                     <button className="qty-btn"
-                      onPointerDown={e => { e.preventDefault(); setLineQty(line.item_code, line.qty - 0.5); }}>−</button>
+                      onPointerDown={e => { e.preventDefault(); setLineQty(line.item_code, line.qty - 0.5); }}>{'\u2212'}</button>
                     <input className="qty-inp" type="number" inputMode="decimal" step="any"
                       value={line.qty}
                       onChange={e => setLineQty(line.item_code, parseFloat(e.target.value) || 0)}
@@ -357,6 +710,50 @@ export function PurchaseReceipts() {
                 </div>
               </div>
             ))}
+
+            {/* ── Item Photos ── */}
+            <div className="photo-section fade">
+              <div className="photo-title">
+                {'\uD83D\uDCF7'} Item Photos
+              </div>
+              <div className="photo-grid">
+                {itemPreviews.map((url, i) => (
+                  <div key={i} className="photo-thumb">
+                    <img src={url} alt={`Item ${i + 1}`} />
+                    <button className="photo-thumb-del" onClick={() => removeItemPhoto(i)}>{'\u2715'}</button>
+                  </div>
+                ))}
+                <button className="photo-add-btn" onClick={() => itemPhotoRef.current?.click()}>
+                  <span className="photo-add-icon">{'\uD83D\uDCF7'}</span>
+                  <span className="photo-add-label">Add</span>
+                </button>
+              </div>
+              <input ref={itemPhotoRef} type="file" accept="image/*" capture="environment"
+                style={{ display:'none' }} onChange={handleItemPhoto} />
+            </div>
+
+            {/* ── Bill / Invoice Photo ── */}
+            <div className="photo-section fade">
+              <div className="photo-title">
+                {'\uD83E\uDDFE'} Bill / Invoice Photo
+              </div>
+              <div className="photo-grid">
+                {billPreview && (
+                  <div className="photo-thumb">
+                    <img src={billPreview} alt="Bill" />
+                    <button className="photo-thumb-del" onClick={removeBillPhoto}>{'\u2715'}</button>
+                  </div>
+                )}
+                {!billPreview && (
+                  <button className="photo-add-btn" onClick={() => billPhotoRef.current?.click()}>
+                    <span className="photo-add-icon">{'\uD83E\uDDFE'}</span>
+                    <span className="photo-add-label">Capture</span>
+                  </button>
+                )}
+              </div>
+              <input ref={billPhotoRef} type="file" accept="image/*" capture="environment"
+                style={{ display:'none' }} onChange={handleBillPhoto} />
+            </div>
           </>
         )}
       </div>
@@ -366,22 +763,35 @@ export function PurchaseReceipts() {
         <div style={{ margin:'0 12px 12px', padding:'11px 14px', background:'var(--rdbg)',
           border:'1.5px solid #FECACA', borderRadius:12, fontSize:13, fontWeight:700,
           color:'var(--rd)', display:'flex', alignItems:'center', gap:8 }}>
-          <span style={{ flex:1 }}>⚠️ {error}</span>
+          <span style={{ flex:1 }}>{'\u26A0\uFE0F'} {error}</span>
           <button onClick={() => setError(null)} style={{ background:'none', border:'none',
-            cursor:'pointer', color:'var(--rd)', fontSize:16, lineHeight:1 }}>✕</button>
+            cursor:'pointer', color:'var(--rd)', fontSize:16, lineHeight:1 }}>{'\u2715'}</button>
         </div>
       )}
 
-      {/* Bottom nav (shown when not confirming) */}
-      {!selected && <BottomNav/>}
+      {/* ── Bottom nav (landing only) ── */}
+      {mode === 'landing' && <BottomNav/>}
 
-      {/* Bottom bar for confirm */}
-      {selected && (
+      {/* ── Bottom bar: direct_items continue ── */}
+      {mode === 'direct_items' && (
         <div className="rbbar">
           <div className="rbbar-inner">
-            <button className="rbbar-cancel" onClick={() => setSelected(null)}>← Back</button>
+            <button className="rbbar-cancel" onClick={goBack}>{'\u2190'} Back</button>
+            <button className="rbbar-continue" disabled={lines.length === 0}
+              onClick={() => setMode('confirm')}>
+              Continue {'\u2014'} {lines.length} Items {'\u2192'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Bottom bar: confirm receipt ── */}
+      {mode === 'confirm' && (
+        <div className="rbbar">
+          <div className="rbbar-inner">
+            <button className="rbbar-cancel" onClick={goBack}>{'\u2190'} Back</button>
             <button className="rbbar-confirm" disabled={loading || lines.length === 0} onClick={handleSubmit}>
-              {loading ? '⏳ Creating...' : `✓ Confirm Receipt — ${lines.length} Items`}
+              {loading ? '\u23F3 Creating...' : `\u2713 Confirm Receipt \u2014 ${lines.length} Items`}
             </button>
           </div>
         </div>

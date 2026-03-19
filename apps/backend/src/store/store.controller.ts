@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common'
+import { Body, Controller, Delete, Get, Param, Post, Query, UploadedFiles, UseInterceptors } from '@nestjs/common'
+import { FilesInterceptor } from '@nestjs/platform-express'
 import { Roles } from '../common/decorators/roles.decorator'
 import { Role } from '../common/enums'
 import { StoreService } from './store.service'
@@ -137,6 +138,15 @@ export class StoreController {
     @Body() body: CreatePurchaseReceiptDto
   ) {
     return this.storeService.createPurchaseReceipt(user, body)
+  }
+
+  @Post('purchase-receipts/:receiptId/upload')
+  @UseInterceptors(FilesInterceptor('files', 10, { limits: { fileSize: 5 * 1024 * 1024 } }))
+  async uploadReceiptPhotos(
+    @Param('receiptId') receiptId: string,
+    @UploadedFiles() files: Express.Multer.File[]
+  ) {
+    return this.storeService.uploadReceiptPhotos(receiptId, files || [])
   }
 
   // ── Store-initiated transfers ────────────────────────────────────────────────

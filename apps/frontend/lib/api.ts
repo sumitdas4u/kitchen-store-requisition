@@ -25,3 +25,27 @@ export async function apiRequest<T>(
 
   return (await response.json()) as T
 }
+
+export async function apiUploadFiles(
+  path: string,
+  files: File[],
+  token?: string
+): Promise<{ uploaded: number; urls: string[] }> {
+  const formData = new FormData()
+  files.forEach(file => formData.append('files', file))
+
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'POST',
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: formData
+  })
+
+  if (!response.ok) {
+    const message = await response.text()
+    throw new Error(message || 'Upload failed')
+  }
+
+  return (await response.json()) as { uploaded: number; urls: string[] }
+}

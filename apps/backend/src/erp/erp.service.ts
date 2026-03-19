@@ -915,6 +915,32 @@ export class ErpService {
     }
   }
 
+  async uploadFile(
+    fileBuffer: Buffer,
+    filename: string,
+    doctype: string,
+    docname: string
+  ): Promise<{ file_url: string }> {
+    await this.ensureBaseUrl()
+    try {
+      const FormData = (await import('form-data')).default
+      const form = new FormData()
+      form.append('file', fileBuffer, { filename })
+      form.append('doctype', doctype)
+      form.append('docname', docname)
+      form.append('is_private', '1')
+
+      const response = await this.client.post(
+        '/api/method/upload_file',
+        form,
+        { headers: form.getHeaders() }
+      )
+      return { file_url: response.data?.message?.file_url || '' }
+    } catch (error) {
+      this.throwErpError(error)
+    }
+  }
+
   async getPriceLists(): Promise<ErpPriceList[]> {
     await this.ensureBaseUrl()
     const fields = JSON.stringify(['name', 'enabled'])
