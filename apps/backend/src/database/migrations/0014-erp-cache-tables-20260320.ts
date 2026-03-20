@@ -1,7 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm'
 
-export class ErpCacheTables20260320 implements MigrationInterface {
-  name = 'ErpCacheTables20260320'
+export class ErpCacheTables20260320140000 implements MigrationInterface {
+  name = 'ErpCacheTables20260320140000'
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
