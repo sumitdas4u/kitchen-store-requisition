@@ -34,7 +34,8 @@ export class AuthService {
       access_token: await this.jwtService.signAsync(payload),
       role: payload.role,
       default_warehouse: payload.default_warehouse,
-      source_warehouse: payload.source_warehouse
+      source_warehouse: payload.source_warehouse,
+      warehouses: (user.warehouses || []).map((w) => w.warehouse)
     }
   }
 

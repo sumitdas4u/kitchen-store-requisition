@@ -13,6 +13,8 @@ import { Requisition } from '../database/entities/requisition.entity'
 import { PriceChangeLog } from '../database/entities/price-change-log.entity'
 import { StockEntryLineCache } from '../database/entities/stock-entry-line-cache.entity'
 import { PurchasePriceCache } from '../database/entities/purchase-price-cache.entity'
+import { ErpItemCache } from '../database/entities/erp-item-cache.entity'
+import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entity'
 
 @Module({
   imports: [
@@ -27,7 +29,9 @@ import { PurchasePriceCache } from '../database/entities/purchase-price-cache.en
       Requisition,
       PriceChangeLog,
       StockEntryLineCache,
-      PurchasePriceCache
+      PurchasePriceCache,
+      ErpItemCache,
+      ErpBinStockCache
     ])
   ],
   controllers: [AdminController],

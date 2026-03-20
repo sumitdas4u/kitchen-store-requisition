@@ -1,6 +1,6 @@
 'use client';
 
-import { LayoutDashboard, ChefHat, Package, Users, Settings, Plug, LogOut, ClipboardList, AlertTriangle, FileText, DollarSign, FileCheck, LayoutGrid } from 'lucide-react';
+import { LayoutDashboard, ChefHat, Package, Users, Settings, Plug, LogOut, ClipboardList, AlertTriangle, FileText, DollarSign, FileCheck, LayoutGrid, DatabaseZap } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { clearToken, getToken } from '../../lib/session';
@@ -43,6 +43,7 @@ export function DesktopLayout({ children }: DesktopLayoutProps) {
     { icon: ChefHat, label: 'Kitchens', path: '/admin/kitchens' },
     { icon: LayoutGrid, label: 'Item Groups', path: '/admin/item-groups' },
     { icon: Users, label: 'Users', path: '/admin/users' },
+    { icon: DatabaseZap, label: 'Data Sync', path: '/admin/sync' },
     { icon: Plug, label: 'ERP Integration', path: '/admin/erp' },
     { icon: Settings, label: 'Settings', path: '/admin/settings' },
   ];

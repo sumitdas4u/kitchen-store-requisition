@@ -475,7 +475,7 @@ function Browse({
         );
       })}
 
-      <div style={{ height: 90 }} />
+      <div style={{ height: 140 }} />
 
       <div className="bbar">
         <div className="bbar-vals">
@@ -975,6 +975,22 @@ export function CreateRequisition() {
       })
       .filter((item) => Number(item.order_qty) > 0 || item.actual_closing !== undefined);
 
+  const requisitionCreateUrl = useMemo(() => {
+    const q = new URLSearchParams();
+    if (resolvedWarehouse) q.set('warehouse', resolvedWarehouse);
+    if (resolvedSourceWarehouse) q.set('source_warehouse', resolvedSourceWarehouse);
+    const qs = q.toString();
+    return `/requisition${qs ? `?${qs}` : ''}`;
+  }, [resolvedWarehouse, resolvedSourceWarehouse]);
+
+  const kitchenBackUrl = useMemo(() => {
+    const q = new URLSearchParams();
+    if (resolvedWarehouse) q.set('warehouse', resolvedWarehouse);
+    if (companyParam) q.set('company', companyParam);
+    const qs = q.toString();
+    return `/kitchen${qs ? `?${qs}` : ''}`;
+  }, [resolvedWarehouse, companyParam]);
+
   const saveDraft = async () => {
     if (!token) return;
     setSubmitting(true);
@@ -990,7 +1006,7 @@ export function CreateRequisition() {
         );
       } else {
         const requisition = await apiRequest<any>(
-          '/requisition',
+          requisitionCreateUrl,
           'POST',
           { requested_date: requestedDate, shift, notes, items },
           token ?? undefined
@@ -1000,7 +1016,7 @@ export function CreateRequisition() {
           setLastRequisitionId(`KR-${requisition.id}`);
         }
       }
-      router.push('/kitchen');
+      router.push(kitchenBackUrl);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -1024,7 +1040,7 @@ export function CreateRequisition() {
         );
       } else {
         const requisition = await apiRequest<any>(
-          '/requisition',
+          requisitionCreateUrl,
           'POST',
           { requested_date: requestedDate, shift, notes, items },
           token ?? undefined
@@ -1068,8 +1084,8 @@ export function CreateRequisition() {
           setOrders={setOrders}
           groups={groups}
           onReview={() => setScreen('confirm')}
-        onBack={() => router.push('/kitchen')}
-          kitchenName={resolvedWarehouse}
+        onBack={() => router.push(kitchenBackUrl)}
+          kitchenName={resolvedWarehouse.replace(/ - FSRaC$/, '').replace(/ - .*$/, '')}
         />
         <div
           style={{
@@ -1199,7 +1215,7 @@ export function CreateRequisition() {
         setActuals({});
         setOrders({});
         setLastRequisitionId('');
-        router.push('/kitchen');
+        router.push(kitchenBackUrl);
       }}
     />
   );

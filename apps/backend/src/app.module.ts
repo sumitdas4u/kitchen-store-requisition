@@ -11,6 +11,7 @@ import { AdminModule } from './admin/admin.module'
 import { ErpModule } from './erp/erp.module'
 import { NotificationsModule } from './notifications/notifications.module'
 import { QueueModule } from './queue/queue.module'
+import { SyncModule } from './sync/sync.module'
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard'
 import { RolesGuard } from './common/guards/roles.guard'
 import { ConfigService } from '@nestjs/config'
@@ -37,7 +38,8 @@ import { DatabaseModule } from './database/database.module'
     StoreModule,
     AdminModule,
     NotificationsModule,
-    QueueModule
+    QueueModule,
+    SyncModule
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

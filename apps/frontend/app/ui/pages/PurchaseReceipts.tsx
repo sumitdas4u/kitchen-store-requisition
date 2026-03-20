@@ -113,6 +113,16 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 .lc-ordered{font-size:11px;font-weight:800;color:var(--md);flex:1}
 .lc-ordered span{color:var(--bl);font-family:'DM Mono',monospace}
 
+.lc-photo{padding:8px 14px 12px;border-top:1px solid var(--lnlt)}
+.lc-photo-btn{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;padding:10px;
+  background:var(--lnlt);border:1.5px dashed var(--ln);border-radius:10px;cursor:pointer;
+  font-family:'Nunito',sans-serif;font-size:12px;font-weight:800;color:var(--md)}
+.lc-photo-btn:active{border-color:var(--or);color:var(--or);background:var(--orl)}
+.lc-photo-row{display:flex;align-items:center;gap:10px}
+.lc-photo-retake{background:none;border:none;cursor:pointer;font-family:'Nunito',sans-serif;
+  font-size:11px;font-weight:800;color:var(--or)}
+.lc-photo-retake:active{opacity:.7}
+
 .qty-ctrl{display:flex;align-items:center;border:1.5px solid var(--ln);border-radius:11px;overflow:hidden;height:42px}
 .qty-btn{width:38px;height:42px;border:none;cursor:pointer;font-size:20px;font-weight:900;
   background:var(--bg);color:var(--dk);display:flex;align-items:center;justify-content:center}
@@ -212,7 +222,7 @@ interface PoRow {
 }
 interface ReceiptLine { item_code: string; item_name?: string; uom?: string; qty: number; ordered?: number }
 interface Vendor { name: string; supplier_name?: string }
-interface SearchItem { name: string; item_name: string; stock_uom?: string }
+interface SearchItem { item_code: string; item_name: string; uom?: string }
 
 type Mode = 'landing' | 'po_select' | 'direct_vendor' | 'direct_items' | 'confirm';
 
@@ -269,12 +279,12 @@ export function PurchaseReceipts() {
   const [successId, setSuccessId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Photos
-  const [itemPhotos, setItemPhotos] = useState<File[]>([]);
-  const [itemPreviews, setItemPreviews] = useState<string[]>([]);
+  // Photos — per-item photos keyed by item_code
+  const [itemPhotos, setItemPhotos] = useState<Record<string, { file: File; preview: string }>>({});
   const [billPhoto, setBillPhoto] = useState<File | null>(null);
   const [billPreview, setBillPreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [activePhotoItem, setActivePhotoItem] = useState<string | null>(null);
   const itemPhotoRef = useRef<HTMLInputElement>(null);
   const billPhotoRef = useRef<HTMLInputElement>(null);
 
@@ -348,25 +358,30 @@ export function PurchaseReceipts() {
     setLines(prev => prev.filter(l => l.item_code !== code));
 
   const addItem = (item: SearchItem) => {
-    if (lines.some(l => l.item_code === item.name)) return;
-    setLines(prev => [...prev, { item_code: item.name, item_name: item.item_name, uom: item.stock_uom || 'Nos', qty: 1 }]);
-    setItemQuery('');
-    setSearchResults([]);
+    if (lines.some(l => l.item_code === item.item_code)) return;
+    setLines(prev => [...prev, { item_code: item.item_code, item_name: item.item_name, uom: item.uom || 'Nos', qty: 1 }]);
   };
 
   const handleItemPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !activePhotoItem) return;
     e.target.value = '';
     const compressed = await compressImage(file);
-    setItemPhotos(prev => [...prev, compressed]);
-    setItemPreviews(prev => [...prev, URL.createObjectURL(compressed)]);
+    const code = activePhotoItem;
+    setItemPhotos(prev => {
+      if (prev[code]?.preview) URL.revokeObjectURL(prev[code].preview);
+      return { ...prev, [code]: { file: compressed, preview: URL.createObjectURL(compressed) } };
+    });
+    setActivePhotoItem(null);
   };
 
-  const removeItemPhoto = (idx: number) => {
-    URL.revokeObjectURL(itemPreviews[idx]);
-    setItemPhotos(prev => prev.filter((_, i) => i !== idx));
-    setItemPreviews(prev => prev.filter((_, i) => i !== idx));
+  const removeItemPhoto = (code: string) => {
+    setItemPhotos(prev => {
+      if (prev[code]?.preview) URL.revokeObjectURL(prev[code].preview);
+      const next = { ...prev };
+      delete next[code];
+      return next;
+    });
   };
 
   const handleBillPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -393,10 +408,9 @@ export function PurchaseReceipts() {
     setItemQuery('');
     setSearchResults([]);
     setError(null);
-    itemPreviews.forEach(u => URL.revokeObjectURL(u));
+    Object.values(itemPhotos).forEach(p => URL.revokeObjectURL(p.preview));
     if (billPreview) URL.revokeObjectURL(billPreview);
-    setItemPhotos([]);
-    setItemPreviews([]);
+    setItemPhotos({});
     setBillPhoto(null);
     setBillPreview(null);
     setUploading(false);
@@ -427,11 +441,18 @@ export function PurchaseReceipts() {
       );
       setSuccessId(res?.receipt_id || 'Created');
 
-      // Upload photos in background (non-blocking)
-      const allPhotos = [...itemPhotos, ...(billPhoto ? [billPhoto] : [])];
-      if (allPhotos.length > 0 && res?.receipt_id) {
+      // Upload photos with meaningful filenames so they're identifiable in ERPNext
+      const namedFiles: File[] = [];
+      for (const [code, p] of Object.entries(itemPhotos)) {
+        const safeName = code.replace(/[\/\\]/g, '_');
+        namedFiles.push(new File([p.file], `${safeName}_photo.jpg`, { type: 'image/jpeg' }));
+      }
+      if (billPhoto) {
+        namedFiles.push(new File([billPhoto], 'bill_invoice.jpg', { type: 'image/jpeg' }));
+      }
+      if (namedFiles.length > 0 && res?.receipt_id) {
         setUploading(true);
-        apiUploadFiles(`/store/purchase-receipts/${res.receipt_id}/upload`, allPhotos, token)
+        apiUploadFiles(`/store/purchase-receipts/${res.receipt_id}/upload`, namedFiles, token)
           .catch(() => {})
           .finally(() => setUploading(false));
       }
@@ -605,20 +626,19 @@ export function PurchaseReceipts() {
 
             {searchResults.length > 0 && (
               <div className="search-results">
-                {searchResults.map(item => (
-                  <div key={item.name} className="search-item" onClick={() => addItem(item)}>
-                    <div className="search-item-info">
-                      <div className="search-item-name">{item.item_name}</div>
-                      <div className="search-item-code">{item.name} {'\u00B7'} {item.stock_uom}</div>
+                {searchResults.map(item => {
+                  const added = lines.some(l => l.item_code === item.item_code);
+                  return (
+                    <div key={item.item_code} className="search-item" onClick={() => !added && addItem(item)}>
+                      <div className="search-item-info">
+                        <div className="search-item-name">{item.item_name}</div>
+                        <div className="search-item-code">{item.item_code} {'\u00B7'} {item.uom}</div>
+                      </div>
+                      {!added && <button className="search-item-add">+</button>}
+                      {added && <span style={{ fontSize:11, fontWeight:800, color:'var(--gn)' }}>{'\u2713'} Added</span>}
                     </div>
-                    {!lines.some(l => l.item_code === item.name) && (
-                      <button className="search-item-add">+</button>
-                    )}
-                    {lines.some(l => l.item_code === item.name) && (
-                      <span style={{ fontSize:11, fontWeight:800, color:'var(--gn)' }}>{'\u2713'} Added</span>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 
@@ -680,57 +700,58 @@ export function PurchaseReceipts() {
               </div>
             </div>
 
-            {/* Line items */}
-            {lines.map(line => (
-              <div key={line.item_code} className="line-card fade">
-                <div className="lc-hdr">
-                  <div className="lc-name">{line.item_name || line.item_code}</div>
-                  <div className="lc-code">{line.item_code}</div>
-                </div>
-                <div className="lc-body">
-                  {line.ordered != null && (
-                    <div className="lc-ordered">
-                      Ordered: <span>{line.ordered} {line.uom}</span>
+            {/* Line items with per-item photo */}
+            {lines.map(line => {
+              const photo = itemPhotos[line.item_code];
+              return (
+                <div key={line.item_code} className="line-card fade">
+                  <div className="lc-hdr">
+                    <div className="lc-name">{line.item_name || line.item_code}</div>
+                    <div className="lc-code">{line.item_code}</div>
+                  </div>
+                  <div className="lc-body">
+                    {line.ordered != null && (
+                      <div className="lc-ordered">
+                        Ordered: <span>{line.ordered} {line.uom}</span>
+                      </div>
+                    )}
+                    {line.ordered == null && (
+                      <span className="qty-unit" style={{ fontSize:11 }}>{line.uom}</span>
+                    )}
+                    <div className="qty-ctrl">
+                      <button className="qty-btn"
+                        onPointerDown={e => { e.preventDefault(); setLineQty(line.item_code, line.qty - 0.5); }}>{'\u2212'}</button>
+                      <input className="qty-inp" type="number" inputMode="decimal" step="any"
+                        value={line.qty}
+                        onChange={e => setLineQty(line.item_code, parseFloat(e.target.value) || 0)}
+                        onFocus={e => e.target.select()} />
+                      <button className="qty-btn add"
+                        onPointerDown={e => { e.preventDefault(); setLineQty(line.item_code, line.qty + 0.5); }}>+</button>
                     </div>
-                  )}
-                  {line.ordered == null && (
-                    <span className="qty-unit" style={{ fontSize:11 }}>{line.uom}</span>
-                  )}
-                  <div className="qty-ctrl">
-                    <button className="qty-btn"
-                      onPointerDown={e => { e.preventDefault(); setLineQty(line.item_code, line.qty - 0.5); }}>{'\u2212'}</button>
-                    <input className="qty-inp" type="number" inputMode="decimal" step="any"
-                      value={line.qty}
-                      onChange={e => setLineQty(line.item_code, parseFloat(e.target.value) || 0)}
-                      onFocus={e => e.target.select()} />
-                    <button className="qty-btn add"
-                      onPointerDown={e => { e.preventDefault(); setLineQty(line.item_code, line.qty + 0.5); }}>+</button>
+                    <span className="qty-unit">{line.uom}</span>
                   </div>
-                  <span className="qty-unit">{line.uom}</span>
+                  <div className="lc-photo">
+                    {photo ? (
+                      <div className="lc-photo-row">
+                        <div className="photo-thumb">
+                          <img src={photo.preview} alt={line.item_name || line.item_code} />
+                          <button className="photo-thumb-del" onClick={() => removeItemPhoto(line.item_code)}>{'\u2715'}</button>
+                        </div>
+                        <button className="lc-photo-retake" onClick={() => { setActivePhotoItem(line.item_code); itemPhotoRef.current?.click(); }}>
+                          {'\uD83D\uDCF7'} Retake
+                        </button>
+                      </div>
+                    ) : (
+                      <button className="lc-photo-btn" onClick={() => { setActivePhotoItem(line.item_code); itemPhotoRef.current?.click(); }}>
+                        {'\uD83D\uDCF7'} Take Photo
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
-
-            {/* ── Item Photos ── */}
-            <div className="photo-section fade">
-              <div className="photo-title">
-                {'\uD83D\uDCF7'} Item Photos
-              </div>
-              <div className="photo-grid">
-                {itemPreviews.map((url, i) => (
-                  <div key={i} className="photo-thumb">
-                    <img src={url} alt={`Item ${i + 1}`} />
-                    <button className="photo-thumb-del" onClick={() => removeItemPhoto(i)}>{'\u2715'}</button>
-                  </div>
-                ))}
-                <button className="photo-add-btn" onClick={() => itemPhotoRef.current?.click()}>
-                  <span className="photo-add-icon">{'\uD83D\uDCF7'}</span>
-                  <span className="photo-add-label">Add</span>
-                </button>
-              </div>
-              <input ref={itemPhotoRef} type="file" accept="image/*" capture="environment"
-                style={{ display:'none' }} onChange={handleItemPhoto} />
-            </div>
+              );
+            })}
+            <input ref={itemPhotoRef} type="file" accept="image/*" capture="environment"
+              style={{ display:'none' }} onChange={handleItemPhoto} />
 
             {/* ── Bill / Invoice Photo ── */}
             <div className="photo-section fade">

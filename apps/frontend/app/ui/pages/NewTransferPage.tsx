@@ -175,7 +175,7 @@ export function NewTransferPage() {
   const [step,         setStep        ] = useState<1|2|3>(1);
   const [kitchens,     setKitchens    ] = useState<string[]>([]);
   const [targetWh,     setTargetWh    ] = useState('');
-  const [customWh,     setCustomWh    ] = useState('');
+  const [whFilter,     setWhFilter    ] = useState('');
   const [search,       setSearch      ] = useState('');
   const [results,      setResults     ] = useState<any[]>([]);
   const [searching,    setSearching   ] = useState(false);
@@ -209,7 +209,10 @@ export function NewTransferPage() {
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [search, token]);
 
-  const effectiveTarget = targetWh === '__custom__' ? customWh.trim() : targetWh;
+  const filteredKitchens = whFilter.trim()
+    ? kitchens.filter(wh => wh.toLowerCase().includes(whFilter.trim().toLowerCase()))
+    : kitchens;
+  const effectiveTarget = targetWh;
   const inCart = (code: string) => cart.some(c => c.item_code === code);
 
   const addItem = (item: any) => {
@@ -281,7 +284,7 @@ export function NewTransferPage() {
               Done → View Transfers
             </button>
             <button className="success-btn2" onClick={() => {
-              setSuccess(null); setCart([]); setNote(''); setSearch(''); setStep(1); setTargetWh('');
+              setSuccess(null); setCart([]); setNote(''); setSearch(''); setStep(1); setTargetWh(''); setWhFilter('');
             }}>
               Send Another Transfer
             </button>
@@ -322,32 +325,32 @@ export function NewTransferPage() {
         {step === 1 && (
           <>
             <div className="sec-title">Select Kitchen / Destination</div>
+            {kitchens.length > 4 && (
+              <input
+                className="wh-custom-input"
+                placeholder="Search warehouses..."
+                value={whFilter}
+                onChange={e => setWhFilter(e.target.value)}
+                style={{ marginBottom: 10 }}
+              />
+            )}
             <div className="wh-grid">
-              {kitchens.map(wh => (
+              {filteredKitchens.map(wh => (
                 <div key={wh} className={`wh-card ${targetWh === wh ? 'selected' : ''}`}
                   onClick={() => setTargetWh(targetWh === wh ? '' : wh)}>
                   <span className="wh-card-icon" style={{ color: getColor(wh) }}>🏪</span>
                   <span className="wh-card-name">{wh}</span>
                 </div>
               ))}
-              <div className={`wh-card ${targetWh === '__custom__' ? 'selected' : ''}`}
-                onClick={() => setTargetWh('__custom__')}>
-                <span className="wh-card-icon">✏️</span>
-                <span className="wh-card-name">Custom Kitchen</span>
-              </div>
             </div>
-            {targetWh === '__custom__' && (
-              <input
-                className="wh-custom-input"
-                placeholder="Type kitchen warehouse name..."
-                value={customWh}
-                onChange={e => setCustomWh(e.target.value)}
-                autoFocus
-              />
-            )}
             {kitchens.length === 0 && (
               <div style={{ textAlign:'center', padding:'24px 20px', color:'#9CA3AF', fontSize:12, fontWeight:700 }}>
-                No kitchens found — use Custom Kitchen to type manually
+                No warehouses assigned to your account
+              </div>
+            )}
+            {kitchens.length > 0 && filteredKitchens.length === 0 && whFilter && (
+              <div style={{ textAlign:'center', padding:'24px 20px', color:'#9CA3AF', fontSize:12, fontWeight:700 }}>
+                No warehouses matching "{whFilter}"
               </div>
             )}
           </>

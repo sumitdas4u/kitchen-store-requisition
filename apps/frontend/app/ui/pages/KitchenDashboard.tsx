@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { apiRequest } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
+import { getWarehouses, getDefaultWarehouse } from '../../../lib/session';
 
 type ReqStatus =
   | 'Draft'
@@ -184,6 +185,16 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 
 .empty{padding:24px;text-align:center;color:var(--lt);font-weight:800}
 .empty-icon{font-size:26px;margin-bottom:4px}
+
+/* WAREHOUSE SWITCHER */
+.wh-switch{display:flex;gap:6px;padding:10px 12px;overflow-x:auto;-webkit-overflow-scrolling:touch;
+  background:var(--dk);border-top:1px solid #374151}
+.wh-switch::-webkit-scrollbar{display:none}
+.wh-pill{padding:6px 12px;border-radius:8px;border:1.5px solid #374151;background:transparent;
+  font-family:'Nunito',sans-serif;font-size:11px;font-weight:800;color:#9CA3AF;
+  cursor:pointer;white-space:nowrap;flex-shrink:0}
+.wh-pill:active{opacity:.8}
+.wh-pill.on{background:var(--or);border-color:var(--or);color:#fff}
 `;
 
 export function KitchenDashboard() {
@@ -194,6 +205,7 @@ export function KitchenDashboard() {
   const companyParam = params.get('company') || '';
   const sourceWarehouseParam = params.get('source_warehouse') || '';
 
+  const [userWarehouses, setUserWarehouses] = useState<string[]>([]);
   const [requisitions, setRequisitions] = useState<Requisition[]>([]);
   const [dateFilter, setDateFilter] = useState<DateFilter>('today');
   const [customDate, setCustomDate] = useState('');
@@ -201,9 +213,21 @@ export function KitchenDashboard() {
   const [yesterdayStr, setYesterdayStr] = useState('');
   const [mounted, setMounted] = useState(false);
 
+  const activeWarehouse = warehouseParam || getDefaultWarehouse() || '';
+  const displayName = activeWarehouse ? activeWarehouse.replace(/ - FSRaC$/, '').replace(/ - .*$/, '') : 'Kitchen';
+  const hasMultipleWarehouses = userWarehouses.length > 1;
+
+  const switchWarehouse = (wh: string) => {
+    const query = new URLSearchParams();
+    query.set('warehouse', wh);
+    if (companyParam) query.set('company', companyParam);
+    if (sourceWarehouseParam) query.set('source_warehouse', sourceWarehouseParam);
+    router.replace(`/kitchen?${query.toString()}`);
+  };
+
   const fetchRequisitions = useCallback(() => {
     const query = new URLSearchParams();
-    if (warehouseParam) query.set('warehouse', warehouseParam);
+    if (activeWarehouse) query.set('warehouse', activeWarehouse);
     if (companyParam) query.set('company', companyParam);
     apiRequest<Requisition[]>(
       `/kitchen/requisitions?${query.toString()}`,
@@ -213,7 +237,7 @@ export function KitchenDashboard() {
     )
       .then(setRequisitions)
       .catch(() => setRequisitions([]));
-  }, [token, warehouseParam, companyParam]);
+  }, [token, activeWarehouse, companyParam]);
 
   useEffect(() => {
     fetchRequisitions();
@@ -232,6 +256,9 @@ export function KitchenDashboard() {
     setYesterdayStr(yesterday);
     setCustomDate(today);
     setMounted(true);
+
+    const whs = getWarehouses();
+    setUserWarehouses(whs);
   }, []);
 
   const filtered = useMemo(() => {
@@ -298,14 +325,14 @@ export function KitchenDashboard() {
 
       <div className="top">
         <div>
-          <div className="top-title">Chinese Kitchen</div>
+          <div className="top-title">{displayName}</div>
           <div className="top-sub">Daily dashboard</div>
         </div>
         <button
           className="new-btn"
           onClick={() => {
             const query = new URLSearchParams();
-            if (warehouseParam) query.set('warehouse', warehouseParam);
+            if (activeWarehouse) query.set('warehouse', activeWarehouse);
             if (companyParam) query.set('company', companyParam);
             if (sourceWarehouseParam) query.set('source_warehouse', sourceWarehouseParam);
             const suffix = query.toString();
@@ -315,6 +342,20 @@ export function KitchenDashboard() {
           + New
         </button>
       </div>
+
+      {hasMultipleWarehouses && (
+        <div className="wh-switch">
+          {userWarehouses.map((wh) => (
+            <button
+              key={wh}
+              className={`wh-pill${wh === activeWarehouse ? ' on' : ''}`}
+              onClick={() => switchWarehouse(wh)}
+            >
+              {wh.replace(/ - FSRaC$/, '').replace(/ - .*$/, '')}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="cards">
         <div className="card alert">
@@ -354,7 +395,7 @@ export function KitchenDashboard() {
         <div
           key={draft.id}
           className="draft-card"
-          onClick={() => router.push(`/kitchen/create-requisition?draft_id=${draft.id}`)}
+          onClick={() => router.push(`/kitchen/create-requisition?draft_id=${draft.id}${activeWarehouse ? `&warehouse=${encodeURIComponent(activeWarehouse)}` : ''}`)}
         >
           <div className="dc-top">
             <div className="dc-info">
@@ -442,7 +483,7 @@ export function KitchenDashboard() {
           key={req.id}
           className="pfs-card"
           onClick={() => {
-            if (canOpen) router.push(`/kitchen/receive/${req.id}`);
+            if (canOpen) router.push(`/kitchen/receive/${req.id}${activeWarehouse ? `?warehouse=${encodeURIComponent(activeWarehouse)}` : ''}`);
           }}
           style={{
             borderColor,
@@ -547,7 +588,7 @@ export function KitchenDashboard() {
           <div
             key={req.id}
             className="req-card"
-            onClick={() => router.push(`/kitchen/completed/${req.id}`)}
+            onClick={() => router.push(`/kitchen/completed/${req.id}${activeWarehouse ? `?warehouse=${encodeURIComponent(activeWarehouse)}` : ''}`)}
           >
             <div className="rc-top">
               <div className="rc-info">

@@ -1,15 +1,19 @@
-import { Body, Controller, Get, Param, Post, Put } from '@nestjs/common'
+import { Body, Controller, ForbiddenException, Get, Param, Post, Put, Query } from '@nestjs/common'
 import { Roles } from '../common/decorators/roles.decorator'
 import { Role } from '../common/enums'
 import { CurrentUser } from '../common/decorators/current-user.decorator'
 import { RequisitionService } from './requisition.service'
+import { UsersService } from '../users/users.service'
 import { CreateRequisitionDto } from './dto/create-requisition.dto'
 import { IssueRequisitionDto } from './dto/issue-requisition.dto'
 import { ConfirmRequisitionDto } from './dto/confirm-requisition.dto'
 
 @Controller('requisition')
 export class RequisitionController {
-  constructor(private readonly requisitionService: RequisitionService) {}
+  constructor(
+    private readonly requisitionService: RequisitionService,
+    private readonly usersService: UsersService
+  ) {}
 
   @Roles(Role.Kitchen)
   @Post()
@@ -21,9 +25,25 @@ export class RequisitionController {
       default_warehouse?: string | null
       source_warehouse?: string | null
     },
-    @Body() body: CreateRequisitionDto
+    @Body() body: CreateRequisitionDto,
+    @Query('warehouse') warehouse?: string,
+    @Query('source_warehouse') sourceWarehouse?: string
   ) {
-    return this.requisitionService.createDraft(user, body)
+    if (warehouse && warehouse !== user.default_warehouse) {
+      const hasAccess = await this.usersService.hasWarehouseAccess(
+        user.user_id,
+        warehouse
+      )
+      if (!hasAccess) {
+        throw new ForbiddenException('Access denied for this warehouse')
+      }
+    }
+    const resolvedUser = {
+      ...user,
+      default_warehouse: warehouse || user.default_warehouse,
+      source_warehouse: sourceWarehouse || user.source_warehouse
+    }
+    return this.requisitionService.createDraft(resolvedUser, body)
   }
 
   @Roles(Role.Kitchen)

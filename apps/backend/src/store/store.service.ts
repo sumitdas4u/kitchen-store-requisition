@@ -1,6 +1,5 @@
 import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
-import { Cron, CronExpression } from '@nestjs/schedule'
 import { In, Repository } from 'typeorm'
 import { ErpService } from '../erp/erp.service'
 import { RequisitionService } from '../requisition/requisition.service'
@@ -12,6 +11,7 @@ import { VendorOrderLine } from '../database/entities/vendor-order-line.entity'
 import { VendorOrderPo } from '../database/entities/vendor-order-po.entity'
 import { VendorReceipt } from '../database/entities/vendor-receipt.entity'
 import { VendorReceiptLine } from '../database/entities/vendor-receipt-line.entity'
+import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entity'
 import { CreateVendorOrderDto } from './dto/create-vendor-order.dto'
 import { VendorOverrideDto } from './dto/vendor-override.dto'
 import { CreatePurchaseReceiptDto } from './dto/create-purchase-receipt.dto'
@@ -20,13 +20,11 @@ import { CreatePurchaseReceiptDto } from './dto/create-purchase-receipt.dto'
 interface StockEntry { qty: number; price: number }
 interface StockCacheEntry { data: Map<string, StockEntry>; ts: number }
 const STOCK_TTL_MS = 5 * 60 * 1000
-const SUPPLIER_TTL_MS = 60 * 60 * 1000
 
 @Injectable()
 export class StoreService implements OnModuleInit {
   private readonly logger = new Logger(StoreService.name)
   private stockCache = new Map<string, StockCacheEntry>()
-  private supplierTs = 0
   private catalogRefreshing = false
 
   constructor(
@@ -47,7 +45,9 @@ export class StoreService implements OnModuleInit {
     @InjectRepository(VendorReceipt)
     private readonly vendorReceiptRepo: Repository<VendorReceipt>,
     @InjectRepository(VendorReceiptLine)
-    private readonly vendorReceiptLineRepo: Repository<VendorReceiptLine>
+    private readonly vendorReceiptLineRepo: Repository<VendorReceiptLine>,
+    @InjectRepository(ErpBinStockCache)
+    private readonly binStockCacheRepo: Repository<ErpBinStockCache>
   ) {}
 
   // ── Bootstrap ─────────────────────────────────────────────────────────────────
@@ -68,20 +68,29 @@ export class StoreService implements OnModuleInit {
     }
   }
 
-  @Cron(CronExpression.EVERY_2_HOURS)
-  async scheduledRefresh() {
-    this.logger.log('Scheduled catalog refresh…')
-    await this.refreshCatalog().catch((e) =>
-      this.logger.warn('Scheduled refresh failed: ' + e.message)
-    )
-  }
-
   // ── Stock cache helper ────────────────────────────────────────────────────────
 
   private async getCachedStock(warehouse: string): Promise<Map<string, StockEntry>> {
     if (!warehouse) return new Map()
-    const cached = this.stockCache.get(warehouse)
-    if (cached && Date.now() - cached.ts < STOCK_TTL_MS) return cached.data
+    // Check in-memory cache first (short TTL)
+    const inMem = this.stockCache.get(warehouse)
+    if (inMem && Date.now() - inMem.ts < STOCK_TTL_MS) return inMem.data
+
+    // Try local DB cache (populated by admin sync)
+    const dbRows = await this.binStockCacheRepo.find({ where: { warehouse } })
+    if (dbRows.length > 0) {
+      const data = new Map<string, StockEntry>()
+      dbRows.forEach((row) =>
+        data.set(row.item_code, {
+          qty: Number(row.actual_qty || 0),
+          price: Number(row.valuation_rate || 0)
+        })
+      )
+      this.stockCache.set(warehouse, { data, ts: Date.now() })
+      return data
+    }
+
+    // Fallback to live ERP if cache is empty
     const rows = await this.erpService.getBinStock(warehouse)
     const data = new Map<string, StockEntry>()
     rows.forEach((row) =>
@@ -94,29 +103,9 @@ export class StoreService implements OnModuleInit {
     return data
   }
 
-  // ── Supplier list: DB-first with TTL ─────────────────────────────────────────
+  // ── Supplier list: DB cache only (synced from admin) ───────────────────────
 
   async listSuppliers() {
-    const count = await this.supplierCacheRepo.count()
-    if (count > 0 && Date.now() - this.supplierTs < SUPPLIER_TTL_MS) {
-      return this.supplierCacheRepo.find({ order: { supplier_name: 'ASC' } })
-    }
-    const suppliers = await this.erpService.listSuppliers()
-    if (suppliers.length > 0) {
-      const rows = suppliers.map((s) =>
-        this.supplierCacheRepo.create({
-          name: s.name,
-          supplier_name: s.supplier_name ?? null,
-          mobile_no: (s as any).mobile_no ?? null,
-          disabled: Boolean((s as any).disabled),
-          cached_at: new Date()
-        })
-      )
-      for (let i = 0; i < rows.length; i += 100) {
-        await this.supplierCacheRepo.save(rows.slice(i, i + 100))
-      }
-      this.supplierTs = Date.now()
-    }
     return this.supplierCacheRepo.find({ order: { supplier_name: 'ASC' } })
   }
 
@@ -141,7 +130,6 @@ export class StoreService implements OnModuleInit {
         for (let i = 0; i < rows.length; i += 100) {
           await this.supplierCacheRepo.save(rows.slice(i, i + 100))
         }
-        this.supplierTs = Date.now()
         this.logger.log(`Refreshed ${rows.length} suppliers`)
       }
       const supplierNameMap = new Map(
@@ -634,47 +622,27 @@ export class StoreService implements OnModuleInit {
   }
 
   async listOpenPurchaseOrders() {
-    const pos = await this.vendorOrderPoRepo.find({
-      where: { status: 'po_created' },
-      order: { created_at: 'DESC' }
-    })
-    // Only real POs — skip FAIL-* entries
-    const realPos = pos.filter((p) => !p.po_id.startsWith('FAIL-'))
-    if (realPos.length === 0) return []
+    // Fetch open POs directly from ERPNext (primary source of truth)
+    const erpPos = await this.erpService.listOpenPurchaseOrders()
+    if (!erpPos.length) return []
 
-    // Deduplicate by po_id (same PO may appear in multiple vendor_order rows)
-    const seen = new Set<string>()
-    const unique = realPos.filter((p) => {
-      if (seen.has(p.po_id)) return false
-      seen.add(p.po_id)
-      return true
-    })
-
-    // Fetch ERP details with error resilience
-    const erpResults = await Promise.allSettled(
-      unique.map((p) => this.erpService.getPurchaseOrder(p.po_id))
+    // Fetch full details (including items) for each PO
+    const detailResults = await Promise.allSettled(
+      erpPos.map((po) => this.erpService.getPurchaseOrder(String(po.name)))
     )
-    const detailMap = new Map<string, any>()
-    unique.forEach((p, i) => {
-      const r = erpResults[i]
-      if (r.status === 'fulfilled' && r.value) detailMap.set(p.po_id, r.value)
-    })
 
-    // Only return POs that are still open in ERPNext (To Receive, To Receive and Bill, Draft)
-    return unique
-      .filter((p) => {
-        const erp = detailMap.get(p.po_id)
-        if (!erp) return false
-        const erpStatus = String(erp.status || '').toLowerCase()
-        return erpStatus !== 'completed' && erpStatus !== 'cancelled' && erpStatus !== 'closed'
+    return erpPos
+      .map((po, i) => {
+        const detail = detailResults[i]
+        const erp = detail.status === 'fulfilled' ? detail.value : null
+        return {
+          po_id: String(po.name),
+          vendor_id: String(po.supplier || ''),
+          vendor_name: String(po.supplier_name || po.supplier || ''),
+          erp
+        }
       })
-      .map((r) => ({
-        po_id: r.po_id,
-        vendor_id: r.vendor_id,
-        vendor_name: r.vendor_name,
-        created_at: r.created_at,
-        erp: detailMap.get(r.po_id) ?? null
-      }))
+      .filter((po) => po.erp !== null)
   }
 
   async createPurchaseReceipt(user: { user_id: number }, dto: CreatePurchaseReceiptDto) {

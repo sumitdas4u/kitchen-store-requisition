@@ -20,6 +20,12 @@ import { VendorReceiptLine } from './entities/vendor-receipt-line.entity'
 import { PriceChangeLog } from './entities/price-change-log.entity'
 import { StockEntryLineCache } from './entities/stock-entry-line-cache.entity'
 import { PurchasePriceCache } from './entities/purchase-price-cache.entity'
+import { ErpItemCache } from './entities/erp-item-cache.entity'
+import { ErpItemGroupCache } from './entities/erp-item-group-cache.entity'
+import { ErpWarehouseCache } from './entities/erp-warehouse-cache.entity'
+import { ErpCompanyCache } from './entities/erp-company-cache.entity'
+import { ErpBinStockCache } from './entities/erp-bin-stock-cache.entity'
+import { SyncLog } from './entities/sync-log.entity'
 
 @Module({
   imports: [
@@ -46,7 +52,13 @@ import { PurchasePriceCache } from './entities/purchase-price-cache.entity'
           VendorReceiptLine,
           PriceChangeLog,
           StockEntryLineCache,
-          PurchasePriceCache
+          PurchasePriceCache,
+          ErpItemCache,
+          ErpItemGroupCache,
+          ErpWarehouseCache,
+          ErpCompanyCache,
+          ErpBinStockCache,
+          SyncLog
         ],
         migrations: [join(__dirname, 'migrations/*{.ts,.js}')],
         migrationsRun: true,

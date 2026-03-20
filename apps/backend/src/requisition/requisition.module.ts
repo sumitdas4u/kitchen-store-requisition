@@ -5,6 +5,7 @@ import { RequisitionService } from './requisition.service'
 import { QueueModule } from '../queue/queue.module'
 import { NotificationsModule } from '../notifications/notifications.module'
 import { ErpModule } from '../erp/erp.module'
+import { UsersModule } from '../users/users.module'
 import { Requisition } from '../database/entities/requisition.entity'
 import { RequisitionItem } from '../database/entities/requisition-item.entity'
 
@@ -13,6 +14,7 @@ import { RequisitionItem } from '../database/entities/requisition-item.entity'
     QueueModule,
     NotificationsModule,
     ErpModule,
+    UsersModule,
     TypeOrmModule.forFeature([Requisition, RequisitionItem])
   ],
   controllers: [RequisitionController],

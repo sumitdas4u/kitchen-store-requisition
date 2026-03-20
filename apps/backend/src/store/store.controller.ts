@@ -10,13 +10,15 @@ import { VendorOverrideDto } from './dto/vendor-override.dto'
 import { CreateVendorOrderDto } from './dto/create-vendor-order.dto'
 import { CreatePurchaseReceiptDto } from './dto/create-purchase-receipt.dto'
 import { CreateStoreTransferDto } from './dto/create-store-transfer.dto'
+import { UsersService } from '../users/users.service'
 
 @Controller('store')
 @Roles(Role.Store)
 export class StoreController {
   constructor(
     private readonly storeService: StoreService,
-    private readonly requisitionService: RequisitionService
+    private readonly requisitionService: RequisitionService,
+    private readonly usersService: UsersService
   ) {}
 
   @Get('requisitions')
@@ -160,8 +162,10 @@ export class StoreController {
   }
 
   @Get('transfer/kitchens')
-  async listKitchenWarehouses() {
-    return this.requisitionService.listKitchenWarehouses()
+  async listKitchenWarehouses(
+    @CurrentUser() user: { user_id: number }
+  ) {
+    return this.usersService.getUserWarehouses(user.user_id)
   }
 
   @Post('transfer/create')

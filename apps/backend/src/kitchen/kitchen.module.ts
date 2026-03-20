@@ -4,14 +4,23 @@ import { KitchenController } from './kitchen.controller'
 import { KitchenService } from './kitchen.service'
 import { ErpModule } from '../erp/erp.module'
 import { RequisitionModule } from '../requisition/requisition.module'
+import { UsersModule } from '../users/users.module'
 import { WarehouseItemGroup } from '../database/entities/warehouse-item-group.entity'
 import { WarehouseItem } from '../database/entities/warehouse-item.entity'
+import { ErpItemCache } from '../database/entities/erp-item-cache.entity'
+import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entity'
 
 @Module({
   imports: [
     ErpModule,
     RequisitionModule,
-    TypeOrmModule.forFeature([WarehouseItemGroup, WarehouseItem])
+    UsersModule,
+    TypeOrmModule.forFeature([
+      WarehouseItemGroup,
+      WarehouseItem,
+      ErpItemCache,
+      ErpBinStockCache
+    ])
   ],
   controllers: [KitchenController],
   providers: [KitchenService]

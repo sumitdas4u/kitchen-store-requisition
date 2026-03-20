@@ -4,6 +4,7 @@ import { StoreController } from './store.controller'
 import { StoreService } from './store.service'
 import { ErpModule } from '../erp/erp.module'
 import { RequisitionModule } from '../requisition/requisition.module'
+import { UsersModule } from '../users/users.module'
 import { SupplierListCache } from '../database/entities/supplier-list-cache.entity'
 import { ItemCatalogCache } from '../database/entities/item-catalog-cache.entity'
 import { VendorItemOverride } from '../database/entities/vendor-item-override.entity'
@@ -12,11 +13,13 @@ import { VendorOrderLine } from '../database/entities/vendor-order-line.entity'
 import { VendorOrderPo } from '../database/entities/vendor-order-po.entity'
 import { VendorReceipt } from '../database/entities/vendor-receipt.entity'
 import { VendorReceiptLine } from '../database/entities/vendor-receipt-line.entity'
+import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entity'
 
 @Module({
   imports: [
     ErpModule,
     RequisitionModule,
+    UsersModule,
     TypeOrmModule.forFeature([
       SupplierListCache,
       ItemCatalogCache,
@@ -25,7 +28,8 @@ import { VendorReceiptLine } from '../database/entities/vendor-receipt-line.enti
       VendorOrderLine,
       VendorOrderPo,
       VendorReceipt,
-      VendorReceiptLine
+      VendorReceiptLine,
+      ErpBinStockCache
     ])
   ],
   controllers: [StoreController],

@@ -5,7 +5,7 @@ import { QueueService } from '../queue/queue.service'
 import { RequisitionService } from '../requisition/requisition.service'
 import { UsersService } from '../users/users.service'
 import { InjectRepository } from '@nestjs/typeorm'
-import { Repository } from 'typeorm'
+import { In, Repository } from 'typeorm'
 import { WarehouseItemGroup } from '../database/entities/warehouse-item-group.entity'
 import { WarehouseItem } from '../database/entities/warehouse-item.entity'
 import { AppSettings } from '../database/entities/app-settings.entity'
@@ -13,6 +13,8 @@ import { Requisition } from '../database/entities/requisition.entity'
 import { PriceChangeLog } from '../database/entities/price-change-log.entity'
 import { StockEntryLineCache } from '../database/entities/stock-entry-line-cache.entity'
 import { PurchasePriceCache } from '../database/entities/purchase-price-cache.entity'
+import { ErpItemCache } from '../database/entities/erp-item-cache.entity'
+import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entity'
 import { CreateUserDto } from '../users/dto/create-user.dto'
 import { UpdateUserDto } from '../users/dto/update-user.dto'
 
@@ -37,7 +39,11 @@ export class AdminService {
     @InjectRepository(StockEntryLineCache)
     private readonly stockEntryCacheRepo: Repository<StockEntryLineCache>,
     @InjectRepository(PurchasePriceCache)
-    private readonly purchasePriceCacheRepo: Repository<PurchasePriceCache>
+    private readonly purchasePriceCacheRepo: Repository<PurchasePriceCache>,
+    @InjectRepository(ErpItemCache)
+    private readonly itemCacheRepo: Repository<ErpItemCache>,
+    @InjectRepository(ErpBinStockCache)
+    private readonly binStockCacheRepo: Repository<ErpBinStockCache>
   ) {}
 
   listUsers() {
@@ -831,8 +837,16 @@ export class AdminService {
   async getLowStock(warehouse: string, days = 30) {
     const db = this.requisitionsRepo.manager
 
-    // 1. Bin stock from ERP (current balance)
-    const binStock = await this.erpService.getBinStock(warehouse)
+    // 1. Bin stock: prefer local cache, fallback to live ERP
+    const cachedBins = await this.binStockCacheRepo.find({ where: { warehouse } })
+    const binStock = cachedBins.length > 0
+      ? cachedBins.map((b) => ({
+          item_code: b.item_code,
+          actual_qty: Number(b.actual_qty),
+          stock_uom: b.stock_uom ?? '',
+          valuation_rate: Number(b.valuation_rate)
+        }))
+      : await this.erpService.getBinStock(warehouse)
     const binMap = new Map(binStock.map((b) => [b.item_code, b]))
 
     // 2. Avg daily usage from local stock entry cache (outgoing transfers from ERP)
@@ -883,22 +897,32 @@ export class AdminService {
       ...shortfallMap.keys()
     ])
 
-    // 5. Resolve item names + filter disabled items from ERP
+    // 5. Resolve item names + filter disabled items from local cache
     const nameMap = new Map<string, string>()
     const disabledSet = new Set<string>()
     const codes = Array.from(allCodes)
     if (codes.length > 0) {
-      try {
-        const items = await this.erpService.getItemsByCodes(codes)
-        // getItemsByCodes already filters disabled — so anything NOT returned is disabled or unknown
-        const returnedCodes = new Set(items.map((i) => i.name))
-        items.forEach((i) => nameMap.set(i.name, i.item_name))
-        // Mark items not returned by ERP as disabled (skip them)
-        for (const code of codes) {
-          if (!returnedCodes.has(code)) disabledSet.add(code)
-        }
-      } catch { /* non-fatal — don't filter if ERP is down */ }
-      // Fall back to local names from cache
+      const cachedItems = await this.itemCacheRepo.find({
+        where: { item_code: In(codes) }
+      })
+      if (cachedItems.length > 0) {
+        const returnedCodes = new Set(cachedItems.filter((i) => !i.disabled).map((i) => i.item_code))
+        cachedItems.forEach((i) => {
+          if (!i.disabled) nameMap.set(i.item_code, i.item_name ?? i.item_code)
+          else disabledSet.add(i.item_code)
+        })
+      } else {
+        // Fallback to live ERP if cache is empty
+        try {
+          const items = await this.erpService.getItemsByCodes(codes)
+          const returnedCodes = new Set(items.map((i) => i.name))
+          items.forEach((i) => nameMap.set(i.name, i.item_name))
+          for (const code of codes) {
+            if (!returnedCodes.has(code)) disabledSet.add(code)
+          }
+        } catch { /* non-fatal */ }
+      }
+      // Fill remaining names from usage cache
       usageCacheRows.forEach((r) => {
         if (r.item_name && !nameMap.has(r.item_code)) nameMap.set(r.item_code, r.item_name)
       })

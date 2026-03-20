@@ -25,14 +25,17 @@ export function KitchenLogin() {
         role: string;
         default_warehouse?: string | null;
         source_warehouse?: string | null;
+        warehouses?: string[];
       }>('/auth/login', 'POST', { username: email, password });
       saveSession({
         token: data.access_token,
         role: data.role,
         default_warehouse: data.default_warehouse ?? null,
-        source_warehouse: data.source_warehouse ?? null
+        source_warehouse: data.source_warehouse ?? null,
+        warehouses: data.warehouses ?? []
       });
-      router.push('/kitchen');
+      const dest = data.role === 'Admin' ? '/admin' : data.role === 'Store User' ? '/store' : '/kitchen';
+      router.push(dest);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -53,12 +56,12 @@ export function KitchenLogin() {
 
         <form onSubmit={handleLogin} className="bg-white rounded-2xl shadow-lg p-8 space-y-6">
           <div>
-            <label className="block text-sm text-gray-700 mb-2">Email</label>
+            <label className="block text-sm text-gray-700 mb-2">Username or Email</label>
             <input
-              type="email"
+              type="text"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="kitchen@restaurant.com"
+              placeholder="username or email@example.com"
               className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
               required
             />

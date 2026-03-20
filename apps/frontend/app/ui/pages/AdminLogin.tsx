@@ -24,18 +24,17 @@ export function AdminLogin() {
         role: string;
         default_warehouse?: string | null;
         source_warehouse?: string | null;
+        warehouses?: string[];
       }>('/auth/login', 'POST', { username, password });
-      if (data.role !== 'Admin') {
-        setError('Access denied. Admin role required.');
-        return;
-      }
       saveSession({
         token: data.access_token,
         role: data.role,
         default_warehouse: data.default_warehouse ?? null,
-        source_warehouse: data.source_warehouse ?? null
+        source_warehouse: data.source_warehouse ?? null,
+        warehouses: data.warehouses ?? []
       });
-      router.push('/admin');
+      const dest = data.role === 'Admin' ? '/admin' : data.role === 'Store User' ? '/store' : '/kitchen';
+      router.push(dest);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -56,12 +55,12 @@ export function AdminLogin() {
 
         <form onSubmit={handleLogin} className="bg-white rounded-2xl shadow-lg p-8 space-y-6">
           <div>
-            <label className="block text-sm text-gray-700 mb-2">Username</label>
+            <label className="block text-sm text-gray-700 mb-2">Username or Email</label>
             <input
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="admin"
+              placeholder="admin or admin@example.com"
               className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               required
             />

@@ -135,6 +135,21 @@ export class UsersService {
     }
   }
 
+  async getUserWarehouses(userId: number): Promise<string[]> {
+    const rows = await this.warehousesRepo.find({
+      where: { user_id: userId },
+      order: { warehouse: 'ASC' }
+    })
+    return rows.map(r => r.warehouse).filter(Boolean)
+  }
+
+  async hasWarehouseAccess(userId: number, warehouse: string): Promise<boolean> {
+    const count = await this.warehousesRepo.count({
+      where: { user_id: userId, warehouse }
+    })
+    return count > 0
+  }
+
   async deactivateUser(id: number) {
     const user = await this.getUser(id)
     user.is_active = false

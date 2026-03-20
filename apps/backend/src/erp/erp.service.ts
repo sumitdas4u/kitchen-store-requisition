@@ -307,25 +307,30 @@ export class ErpService {
       'stock_uom',
       'disabled'
     ])
+    // Batch item codes to avoid URL length limits (ERPNext returns 400 for long URLs)
+    const BATCH_SIZE = 50
+    const all: ErpItem[] = []
     try {
-      const pageSize = 500
-      const all: ErpItem[] = []
-      let offset = 0
-      while (true) {
-        const filters = JSON.stringify([['name', 'in', itemCodes]])
-        const response = await this.client.get(
-          `/api/resource/Item?filters=${encodeURIComponent(
-            filters
-          )}&fields=${encodeURIComponent(
-            fields
-          )}&limit_page_length=${pageSize}&limit_start=${offset}`
-        )
-        const page = response.data.data as ErpItem[]
-        all.push(...page)
-        if (page.length < pageSize) {
-          break
+      for (let b = 0; b < itemCodes.length; b += BATCH_SIZE) {
+        const batch = itemCodes.slice(b, b + BATCH_SIZE)
+        const pageSize = 500
+        let offset = 0
+        while (true) {
+          const filters = JSON.stringify([['name', 'in', batch]])
+          const response = await this.client.get(
+            `/api/resource/Item?filters=${encodeURIComponent(
+              filters
+            )}&fields=${encodeURIComponent(
+              fields
+            )}&limit_page_length=${pageSize}&limit_start=${offset}`
+          )
+          const page = response.data.data as ErpItem[]
+          all.push(...page)
+          if (page.length < pageSize) {
+            break
+          }
+          offset += pageSize
         }
-        offset += pageSize
       }
       return all.filter((item: any) => !item.disabled)
     } catch (error) {
@@ -878,6 +883,32 @@ export class ErpService {
     }
   }
 
+  async listOpenPurchaseOrders(): Promise<Record<string, unknown>[]> {
+    await this.ensureBaseUrl()
+    const fields = JSON.stringify(['name', 'supplier', 'supplier_name', 'grand_total', 'status', 'transaction_date'])
+    const filters = JSON.stringify([
+      ['docstatus', '=', 1],
+      ['status', 'not in', ['Completed', 'Cancelled', 'Closed']]
+    ])
+    const pageSize = 100
+    const all: Record<string, unknown>[] = []
+    let offset = 0
+    try {
+      while (true) {
+        const response = await this.client.get(
+          `/api/resource/Purchase Order?fields=${encodeURIComponent(fields)}&filters=${encodeURIComponent(filters)}&order_by=transaction_date desc&limit_page_length=${pageSize}&limit_start=${offset}`
+        )
+        const page = (response.data.data || []) as Record<string, unknown>[]
+        all.push(...page)
+        if (page.length < pageSize) break
+        offset += pageSize
+      }
+      return all
+    } catch (error) {
+      this.throwErpError(error)
+    }
+  }
+
   async getPurchaseOrder(name: string): Promise<Record<string, unknown>> {
     await this.ensureBaseUrl()
     try {
@@ -925,15 +956,23 @@ export class ErpService {
     try {
       const FormData = (await import('form-data')).default
       const form = new FormData()
-      form.append('file', fileBuffer, { filename })
+      form.append('file', fileBuffer, { filename, contentType: 'image/jpeg' })
       form.append('doctype', doctype)
       form.append('docname', docname)
+      form.append('attached_to_doctype', doctype)
+      form.append('attached_to_name', docname)
       form.append('is_private', '1')
+      form.append('folder', 'Home/Attachments')
 
       const response = await this.client.post(
         '/api/method/upload_file',
         form,
-        { headers: form.getHeaders() }
+        {
+          headers: form.getHeaders(),
+          timeout: 30000,
+          maxContentLength: 10 * 1024 * 1024,
+          maxBodyLength: 10 * 1024 * 1024
+        }
       )
       return { file_url: response.data?.message?.file_url || '' }
     } catch (error) {

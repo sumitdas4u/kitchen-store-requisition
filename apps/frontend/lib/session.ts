@@ -17,6 +17,7 @@ export function saveSession(data: {
   role?: string
   default_warehouse?: string | null
   source_warehouse?: string | null
+  warehouses?: string[]
 }) {
   if (typeof window === 'undefined') {
     return
@@ -30,6 +31,9 @@ export function saveSession(data: {
   }
   if (typeof data.source_warehouse !== 'undefined') {
     window.localStorage.setItem('source_warehouse', data.source_warehouse || '')
+  }
+  if (data.warehouses) {
+    window.localStorage.setItem('warehouses', JSON.stringify(data.warehouses))
   }
 }
 
@@ -54,6 +58,19 @@ export function getSourceWarehouse(): string | null {
   return window.localStorage.getItem('source_warehouse')
 }
 
+export function getWarehouses(): string[] {
+  if (typeof window === 'undefined') {
+    return []
+  }
+  const raw = window.localStorage.getItem('warehouses')
+  if (!raw) return []
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return []
+  }
+}
+
 export function clearToken() {
   if (typeof window === 'undefined') {
     return
@@ -62,4 +79,5 @@ export function clearToken() {
   window.localStorage.removeItem('role')
   window.localStorage.removeItem('default_warehouse')
   window.localStorage.removeItem('source_warehouse')
+  window.localStorage.removeItem('warehouses')
 }
