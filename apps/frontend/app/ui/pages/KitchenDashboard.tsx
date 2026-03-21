@@ -226,6 +226,7 @@ export function KitchenDashboard() {
   };
 
   const fetchRequisitions = useCallback(() => {
+    if (!token) return;
     const query = new URLSearchParams();
     if (activeWarehouse) query.set('warehouse', activeWarehouse);
     if (companyParam) query.set('company', companyParam);
@@ -233,7 +234,7 @@ export function KitchenDashboard() {
       `/kitchen/requisitions?${query.toString()}`,
       'GET',
       undefined,
-      token ?? undefined
+      token
     )
       .then(setRequisitions)
       .catch(() => setRequisitions([]));
@@ -259,6 +260,15 @@ export function KitchenDashboard() {
 
     const whs = getWarehouses();
     setUserWarehouses(whs);
+
+    // Auto-select first warehouse if no default is set
+    if (!warehouseParam && !getDefaultWarehouse() && whs.length > 0) {
+      const query = new URLSearchParams();
+      query.set('warehouse', whs[0]);
+      if (companyParam) query.set('company', companyParam);
+      if (sourceWarehouseParam) query.set('source_warehouse', sourceWarehouseParam);
+      router.replace(`/kitchen?${query.toString()}`);
+    }
   }, []);
 
   const filtered = useMemo(() => {
@@ -318,6 +328,55 @@ export function KitchenDashboard() {
     await apiRequest(`/requisition/${id}/delete`, 'PUT', undefined, token ?? undefined);
     setRequisitions((prev) => prev.filter((r) => r.id !== id));
   };
+
+  if (mounted && !activeWarehouse && userWarehouses.length === 0) {
+    return (
+      <div className="app">
+        <style>{CSS}</style>
+        <div className="top">
+          <div>
+            <div className="top-title">Kitchen</div>
+            <div className="top-sub">Daily dashboard</div>
+          </div>
+        </div>
+        <div style={{ padding: '40px 20px', textAlign: 'center' }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>⚠️</div>
+          <div style={{ fontSize: 16, fontWeight: 900, color: '#111827', marginBottom: 8 }}>
+            No Warehouse Assigned
+          </div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#6B7280', lineHeight: 1.6 }}>
+            Your account is not assigned to any warehouse. Please contact your admin to assign a warehouse to your account.
+          </div>
+          <button
+            onClick={() => {
+              if (typeof window !== 'undefined') {
+                window.localStorage.removeItem('access_token');
+                window.localStorage.removeItem('role');
+                window.localStorage.removeItem('default_warehouse');
+                window.localStorage.removeItem('source_warehouse');
+                window.localStorage.removeItem('warehouses');
+              }
+              router.push('/kitchen/login');
+            }}
+            style={{
+              marginTop: 20,
+              padding: '12px 24px',
+              background: '#F3F4F6',
+              color: '#111827',
+              border: '1.5px solid #E5E7EB',
+              borderRadius: 10,
+              fontFamily: "'Nunito', sans-serif",
+              fontSize: 13,
+              fontWeight: 800,
+              cursor: 'pointer'
+            }}
+          >
+            Logout
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app">

@@ -53,6 +53,12 @@ export class Requisition {
   @Column({ type: 'varchar', length: 100, nullable: true })
   queue_job_id: string | null
 
+  @Column({ type: 'boolean', default: false })
+  erp_synced: boolean
+
+  @Column({ type: 'timestamp', nullable: true })
+  last_synced_at: Date | null
+
   @Column({ type: 'text', nullable: true })
   notes: string | null
 

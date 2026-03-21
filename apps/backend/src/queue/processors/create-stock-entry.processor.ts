@@ -28,6 +28,9 @@ export class CreateStockEntryProcessor extends WorkerHost {
       throw new Error(`Requisition not found: ${requisitionId}`)
     }
 
+    const activeItems = requisition.items
+      .filter((item) => Number(item.received_qty) > 0 || Number(item.issued_qty) > 0)
+
     const payload = {
       doctype: 'Stock Entry',
       stock_entry_type: 'Material Transfer',
@@ -36,18 +39,19 @@ export class CreateStockEntryProcessor extends WorkerHost {
       from_warehouse: requisition.source_warehouse,
       to_warehouse: requisition.warehouse,
       remarks: `KR-${requisition.id} | ${requisition.warehouse} | ${requisition.requested_date}`,
-      items: requisition.items
-        .filter((item) => Number(item.received_qty) > 0 || Number(item.issued_qty) > 0)
-        .map((item) => ({
-          item_code: item.item_code,
-          item_name: item.item_name,
-          qty: Number(item.received_qty) > 0 ? Number(item.received_qty) : Number(item.issued_qty),
-          uom: item.uom,
-          stock_uom: item.uom,
-          s_warehouse: requisition.source_warehouse,
-          t_warehouse: requisition.warehouse,
-          conversion_factor: 1
-        }))
+      items: activeItems.map((item) => ({
+        item_code: item.item_code,
+        item_name: item.item_name,
+        qty: Number(item.received_qty) > 0 ? Number(item.received_qty) : Number(item.issued_qty),
+        uom: item.uom,
+        stock_uom: item.uom,
+        s_warehouse: requisition.source_warehouse,
+        t_warehouse: requisition.warehouse,
+        conversion_factor: 1,
+        // Link to Material Request at item level
+        ...(requisition.erp_name ? { material_request: requisition.erp_name } : {}),
+        ...(item.erp_mr_item_name ? { material_request_item: item.erp_mr_item_name } : {})
+      }))
     }
 
     const stockEntryName = await this.erpService.createStockEntryDraft(payload)

@@ -105,3 +105,47 @@ export interface ErpStockEntryDetail {
   qty: number
   s_warehouse: string | null
 }
+
+// ── Material Request ────────────────────────────────────────────────────────
+
+export interface ErpMaterialRequestItem {
+  item_code: string
+  item_name?: string
+  qty: number
+  uom?: string
+  stock_uom?: string
+  warehouse?: string        // source warehouse (where items come from)
+  schedule_date?: string
+  conversion_factor?: number
+}
+
+export interface ErpMaterialRequest {
+  name: string
+  material_request_type: string
+  company: string
+  transaction_date?: string
+  schedule_date?: string
+  set_warehouse?: string    // target warehouse (where items go to)
+  status?: string           // Draft, Submitted, Partially Ordered, Ordered, Transferred, Cancelled, etc.
+  docstatus?: number        // 0=Draft, 1=Submitted, 2=Cancelled
+  per_ordered?: number
+  items?: ErpMaterialRequestItem[]
+  // Custom fields (must be added in ERPNext)
+  custom_shift?: string
+  custom_local_id?: string
+  custom_store_note?: string
+}
+
+export interface ErpMaterialRequestSummary {
+  name: string
+  material_request_type: string
+  status: string
+  docstatus: number
+  company: string
+  transaction_date?: string
+  schedule_date?: string
+  set_warehouse?: string
+  per_ordered?: number
+  custom_shift?: string
+  custom_local_id?: string
+}

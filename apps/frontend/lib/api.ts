@@ -19,6 +19,16 @@ export async function apiRequest<T>(
   })
 
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== 'undefined' && !path.startsWith('/auth/') && token) {
+      const role = window.localStorage.getItem('role')
+      window.localStorage.removeItem('access_token')
+      window.localStorage.removeItem('role')
+      window.localStorage.removeItem('default_warehouse')
+      window.localStorage.removeItem('source_warehouse')
+      window.localStorage.removeItem('warehouses')
+      const loginPath = role === 'Store User' ? '/store/login' : role === 'Admin' ? '/admin/login' : '/kitchen/login'
+      window.location.href = loginPath
+    }
     const message = await response.text()
     throw new Error(message || 'Request failed')
   }
@@ -43,6 +53,16 @@ export async function apiUploadFiles(
   })
 
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== 'undefined') {
+      const role = window.localStorage.getItem('role')
+      window.localStorage.removeItem('access_token')
+      window.localStorage.removeItem('role')
+      window.localStorage.removeItem('default_warehouse')
+      window.localStorage.removeItem('source_warehouse')
+      window.localStorage.removeItem('warehouses')
+      const loginPath = role === 'Store User' ? '/store/login' : role === 'Admin' ? '/admin/login' : '/kitchen/login'
+      window.location.href = loginPath
+    }
     const message = await response.text()
     throw new Error(message || 'Upload failed')
   }

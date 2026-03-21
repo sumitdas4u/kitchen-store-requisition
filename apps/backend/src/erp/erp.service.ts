@@ -19,7 +19,9 @@ import {
   ErpItemPrice,
   ErpPriceList,
   ErpStockEntrySummary,
-  ErpStockEntryDetail
+  ErpStockEntryDetail,
+  ErpMaterialRequest,
+  ErpMaterialRequestSummary
 } from './interfaces/erp.interfaces'
 import { AppSettings } from '../database/entities/app-settings.entity'
 
@@ -1146,6 +1148,139 @@ export class ErpService {
     } catch (error) {
       if (this.isPermissionError(error)) return []
       if (this.isFilterFieldError(error)) return []
+      this.throwErpError(error)
+    }
+  }
+
+  // ── Material Request ────────────────────────────────────────────────────────
+
+  async createMaterialRequestDraft(payload: Record<string, unknown>): Promise<string> {
+    await this.ensureBaseUrl()
+    try {
+      const response = await this.client.post(
+        '/api/resource/Material Request',
+        {
+          ...payload,
+          docstatus: 0,
+          material_request_type: payload.material_request_type || 'Material Transfer'
+        }
+      )
+      return response.data.data?.name as string
+    } catch (error) {
+      this.throwErpError(error)
+    }
+  }
+
+  async updateMaterialRequest(name: string, payload: Record<string, unknown>): Promise<void> {
+    await this.ensureBaseUrl()
+    try {
+      await this.client.put(
+        `/api/resource/Material Request/${encodeURIComponent(name)}`,
+        payload
+      )
+    } catch (error) {
+      this.throwErpError(error)
+    }
+  }
+
+  async submitMaterialRequest(name: string): Promise<void> {
+    await this.ensureBaseUrl()
+    try {
+      await this.client.put(
+        `/api/resource/Material Request/${encodeURIComponent(name)}`,
+        { docstatus: 1 }
+      )
+    } catch (error) {
+      this.throwErpError(error)
+    }
+  }
+
+  async cancelMaterialRequest(name: string): Promise<void> {
+    await this.ensureBaseUrl()
+    try {
+      await this.client.put(
+        `/api/resource/Material Request/${encodeURIComponent(name)}`,
+        { docstatus: 2 }
+      )
+    } catch (error) {
+      this.throwErpError(error)
+    }
+  }
+
+  async getMaterialRequest(name: string): Promise<ErpMaterialRequest | null> {
+    await this.ensureBaseUrl()
+    try {
+      const response = await this.client.get(
+        `/api/resource/Material Request/${encodeURIComponent(name)}`
+      )
+      return response.data.data as ErpMaterialRequest
+    } catch (error) {
+      if (this.isPermissionError(error)) return null
+      this.throwErpError(error)
+    }
+  }
+
+  async listMaterialRequests(filters?: Record<string, unknown>): Promise<ErpMaterialRequestSummary[]> {
+    await this.ensureBaseUrl()
+    const fields = JSON.stringify([
+      'name', 'material_request_type', 'status', 'docstatus',
+      'company', 'transaction_date', 'schedule_date',
+      'set_warehouse', 'per_ordered',
+      'custom_shift', 'custom_local_id'
+    ])
+    const filterArr: unknown[][] = [
+      ['material_request_type', '=', 'Material Transfer']
+    ]
+    if (filters?.warehouse) {
+      filterArr.push(['set_warehouse', '=', filters.warehouse])
+    }
+    if (filters?.status) {
+      filterArr.push(['status', '=', filters.status])
+    }
+    if (filters?.from_date) {
+      filterArr.push(['transaction_date', '>=', filters.from_date])
+    }
+    try {
+      const pageSize = 200
+      const all: ErpMaterialRequestSummary[] = []
+      let offset = 0
+      while (true) {
+        const response = await this.client.get(
+          `/api/resource/Material Request?fields=${encodeURIComponent(fields)}&filters=${encodeURIComponent(JSON.stringify(filterArr))}&order_by=transaction_date desc&limit_page_length=${pageSize}&limit_start=${offset}`
+        )
+        const page = response.data.data as ErpMaterialRequestSummary[]
+        all.push(...page)
+        if (page.length < pageSize) break
+        offset += pageSize
+      }
+      return all
+    } catch (error) {
+      if (this.isPermissionError(error)) return []
+      // Custom fields may not exist yet — retry without them
+      if (this.isFilterFieldError(error)) {
+        const fallbackFields = JSON.stringify([
+          'name', 'material_request_type', 'status', 'docstatus',
+          'company', 'transaction_date', 'schedule_date',
+          'set_warehouse', 'per_ordered'
+        ])
+        try {
+          const pageSize = 200
+          const all: ErpMaterialRequestSummary[] = []
+          let offset = 0
+          while (true) {
+            const response = await this.client.get(
+              `/api/resource/Material Request?fields=${encodeURIComponent(fallbackFields)}&filters=${encodeURIComponent(JSON.stringify(filterArr))}&order_by=transaction_date desc&limit_page_length=${pageSize}&limit_start=${offset}`
+            )
+            const page = response.data.data as ErpMaterialRequestSummary[]
+            all.push(...page)
+            if (page.length < pageSize) break
+            offset += pageSize
+          }
+          return all
+        } catch (fallbackError) {
+          this.throwErpError(fallbackError)
+        }
+      }
       this.throwErpError(error)
     }
   }

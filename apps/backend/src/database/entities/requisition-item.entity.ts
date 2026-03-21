@@ -44,4 +44,7 @@ export class RequisitionItem {
 
   @Column({ type: 'varchar', length: 50, default: 'Pending' })
   item_status: string
+
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  erp_mr_item_name: string | null
 }

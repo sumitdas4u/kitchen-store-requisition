@@ -1065,7 +1065,32 @@ export function CreateRequisition() {
     return (
       <div className="app">
         <style>{CSS}</style>
-        <div style={{ padding: 16, fontWeight: 800 }}>Warehouse not assigned.</div>
+        <div style={{ padding: '40px 20px', textAlign: 'center' }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>⚠️</div>
+          <div style={{ fontSize: 16, fontWeight: 900, color: '#111827', marginBottom: 8 }}>
+            No Warehouse Assigned
+          </div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#6B7280', lineHeight: 1.6 }}>
+            Your account is not assigned to any warehouse. Please contact your admin to assign a warehouse to your account.
+          </div>
+          <button
+            onClick={() => router.push(kitchenBackUrl)}
+            style={{
+              marginTop: 20,
+              padding: '12px 24px',
+              background: '#F3F4F6',
+              color: '#111827',
+              border: '1.5px solid #E5E7EB',
+              borderRadius: 10,
+              fontFamily: "'Nunito', sans-serif",
+              fontSize: 13,
+              fontWeight: 800,
+              cursor: 'pointer'
+            }}
+          >
+            ← Go Back
+          </button>
+        </div>
       </div>
     );
   }

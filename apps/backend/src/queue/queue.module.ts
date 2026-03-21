@@ -12,6 +12,7 @@ import { ErpModule } from '../erp/erp.module'
 import { NotificationsModule } from '../notifications/notifications.module'
 import { QueueController } from './queue.controller'
 import { Requisition } from '../database/entities/requisition.entity'
+import { RequisitionItem } from '../database/entities/requisition-item.entity'
 import { WarehouseItemGroup } from '../database/entities/warehouse-item-group.entity'
 
 @Module({
@@ -24,7 +25,7 @@ import { WarehouseItemGroup } from '../database/entities/warehouse-item-group.en
       { name: QUEUE_NAMES.SyncItems }
     ),
     ErpModule,
-    TypeOrmModule.forFeature([Requisition, WarehouseItemGroup]),
+    TypeOrmModule.forFeature([Requisition, RequisitionItem, WarehouseItemGroup]),
     forwardRef(() => NotificationsModule)
   ],
   controllers: [QueueController],

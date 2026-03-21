@@ -10,6 +10,8 @@ import { ErpCompanyCache } from '../database/entities/erp-company-cache.entity'
 import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entity'
 import { SupplierListCache } from '../database/entities/supplier-list-cache.entity'
 import { SyncLog } from '../database/entities/sync-log.entity'
+import { Requisition } from '../database/entities/requisition.entity'
+import { RequisitionItem } from '../database/entities/requisition-item.entity'
 
 @Module({
   imports: [
@@ -21,7 +23,9 @@ import { SyncLog } from '../database/entities/sync-log.entity'
       ErpCompanyCache,
       ErpBinStockCache,
       SupplierListCache,
-      SyncLog
+      SyncLog,
+      Requisition,
+      RequisitionItem
     ])
   ],
   controllers: [SyncController],
