@@ -4,6 +4,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
 import { QUEUE_NAMES } from '../../common/constants'
+import { StockEntrySyncStatus } from '../../common/enums'
 import { ErpService } from '../../erp/erp.service'
 import { Requisition } from '../../database/entities/requisition.entity'
 import { RequisitionItem } from '../../database/entities/requisition-item.entity'
@@ -29,6 +30,17 @@ export class ErpWriteProcessor extends WorkerHost {
     private readonly requisitionItemsRepo: Repository<RequisitionItem>
   ) {
     super()
+  }
+
+  private extractErpError(error: any, fallback = 'ERP sync failed') {
+    const raw = error?.response?.data
+    return (
+      raw?.exception ||
+      raw?.message ||
+      (typeof raw === 'string' ? raw : null) ||
+      error?.message ||
+      fallback
+    )
   }
 
   /**
@@ -67,8 +79,39 @@ export class ErpWriteProcessor extends WorkerHost {
     const { action, payload } = job.data
 
     switch (action) {
-      case 'submit_stock_entry':
-        return this.erpService.submitStockEntry(String(payload.name))
+      case 'submit_stock_entry': {
+        const stockEntryName = String(payload.name)
+        const requisitionId = Number(payload.requisition_id || 0)
+
+        try {
+          await this.erpService.submitStockEntry(stockEntryName)
+
+          if (requisitionId > 0) {
+            await this.requisitionsRepo.update(requisitionId, {
+              stock_entry_status: StockEntrySyncStatus.Submitted,
+              stock_entry_error_message: null,
+              stock_entry_last_attempt_at: new Date(),
+              erp_synced: true,
+              last_synced_at: new Date()
+            })
+          }
+
+          return
+        } catch (error: any) {
+          if (requisitionId > 0) {
+            await this.requisitionsRepo.update(requisitionId, {
+              stock_entry_status: StockEntrySyncStatus.Failed,
+              stock_entry_error_message: this.extractErpError(
+                error,
+                'Failed to submit Stock Entry'
+              ),
+              stock_entry_last_attempt_at: new Date(),
+              erp_synced: false
+            })
+          }
+          throw error
+        }
+      }
 
       case 'submit_stock_reconciliation':
         return this.erpService.submitStockReconciliation(String(payload.name))

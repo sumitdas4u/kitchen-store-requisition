@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft, Share2 } from 'lucide-react';
 import { apiRequest } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
+import { shareMessage } from '../../../lib/share';
 
 interface ReqItem {
   item_code: string;
@@ -29,16 +30,6 @@ interface Requisition {
 const fmtDate = (d: string): string => {
   const [, m, day] = d.split('-');
   return `${day}/${m}`;
-};
-
-const shareOnWhatsApp = (title: string, text: string) => {
-  const payload = `${title}\n${text}`.trim();
-  if (navigator.share) {
-    navigator.share({ title, text: payload }).catch(() => {});
-    return;
-  }
-  const url = `https://wa.me/?text=${encodeURIComponent(payload)}`;
-  window.open(url, '_blank');
 };
 
 const CSS = `
@@ -161,7 +152,7 @@ export function CompletedRequisitionDetails() {
     .filter(Boolean)
     .join('\n');
 
-  const shareText = [summaryText, '', itemsText, '', notesText]
+  const sharePayload = [summaryText, '', itemsText, '', notesText]
     .filter((t) => t && t.trim().length > 0)
     .join('\n');
 
@@ -198,7 +189,14 @@ export function CompletedRequisitionDetails() {
         <section className="sec">
           <div className="sec-h">
             <div className="sec-title">Summary</div>
-            <button className="wa-btn" onClick={() => shareOnWhatsApp(`KR-${req.id} Details`, shareText)}>
+            <button
+              className="wa-btn"
+              onClick={() =>
+                void shareMessage({
+                  title: `KR-${req.id} Details`,
+                  text: sharePayload
+                })
+              }>
               <Share2 className="w-4 h-4" />
               WhatsApp
             </button>

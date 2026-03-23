@@ -1,4 +1,4 @@
-import { RequisitionStatus, Shift } from '../../common/enums'
+import { RequisitionStatus, Shift, StockEntrySyncStatus } from '../../common/enums'
 
 export class RequisitionEntity {
   id: number
@@ -10,6 +10,9 @@ export class RequisitionEntity {
   shift: Shift
   status: RequisitionStatus
   stock_entry?: string
+  stock_entry_status?: StockEntrySyncStatus
+  stock_entry_error_message?: string | null
+  stock_entry_last_attempt_at?: string | null
   submitted_at?: string
   issued_at?: string
   completed_at?: string

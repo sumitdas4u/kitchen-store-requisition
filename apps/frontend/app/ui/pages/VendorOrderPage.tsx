@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { apiRequest } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
+import { shareMessage } from '../../../lib/share';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1107,9 +1108,13 @@ function CartTab({ cart, vendorMap, shortageItems, token, onQtyChange, onRemove,
     const poId   = poResult?.poMap[vendorId];
     const msg    = buildWaMessage(vendor, lines, poId);
     const phone  = vendor.phone.replace(/\D/g, '');
-    if (phone) window.open(`https://wa.me/91${phone}?text=${encodeURIComponent(msg)}`, '_blank');
-    else if (navigator.share) navigator.share({ title: 'Purchase Order', text: msg }).catch(() => {});
-    else navigator.clipboard.writeText(msg).then(() => alert('Message copied to clipboard'));
+    void shareMessage({
+      title: 'Purchase Order',
+      text: msg,
+      phone: phone || undefined,
+      preferNative: !phone,
+      copiedMessage: 'Message copied to clipboard'
+    });
   };
 
   const shareAll = () => {
@@ -1131,8 +1136,11 @@ function CartTab({ cart, vendorMap, shortageItems, token, onQtyChange, onRemove,
       ``,
       `*Grand Total: ${inr(grandTotal)}*`,
     ].join('\n');
-    if (navigator.share) navigator.share({ title: 'Purchase Orders', text: msg }).catch(() => {});
-    else window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+    void shareMessage({
+      title: 'Purchase Orders',
+      text: msg,
+      copiedMessage: 'Message copied to clipboard'
+    });
   };
 
   if (!cart.length) return (
@@ -1675,9 +1683,13 @@ function ReviewScreen({ cart, vendorMap, token, onBack, onDone }: {
     const lines  = byVendor[vendorId];
     const msg    = buildWaMessage(vendor, lines, poMap[vendorId]);
     const phone  = vendor.phone.replace(/\D/g, '');
-    if (phone) window.open(`https://wa.me/91${phone}?text=${encodeURIComponent(msg)}`, '_blank');
-    else if (navigator.share) navigator.share({ title: 'Purchase Order', text: msg }).catch(() => {});
-    else navigator.clipboard.writeText(msg).then(() => alert('Message copied to clipboard'));
+    void shareMessage({
+      title: 'Purchase Order',
+      text: msg,
+      phone: phone || undefined,
+      preferNative: !phone,
+      copiedMessage: 'Message copied to clipboard'
+    });
   };
 
   const shareAll = () => {
@@ -1698,8 +1710,11 @@ function ReviewScreen({ cart, vendorMap, token, onBack, onDone }: {
       ``,
       `*Grand Total: ${inr(grandTotal)}*`,
     ].join('\n');
-    if (navigator.share) navigator.share({ title: 'Purchase Orders', text: msg }).catch(() => {});
-    else window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+    void shareMessage({
+      title: 'Purchase Orders',
+      text: msg,
+      copiedMessage: 'Message copied to clipboard'
+    });
   };
 
   return (
@@ -2024,9 +2039,13 @@ export default function VendorOrderPage() {
     const vendor = getV(vendorMap, order.vendorId);
     const msg    = buildWaMessage(vendor, order.lines, order.poId);
     const phone  = vendor.phone.replace(/\D/g, '');
-    if (phone) window.open(`https://wa.me/91${phone}?text=${encodeURIComponent(msg)}`, '_blank');
-    else if (navigator.share) navigator.share({ title: 'Purchase Order', text: msg }).catch(() => {});
-    else navigator.clipboard.writeText(msg).then(() => alert('Copied to clipboard'));
+    void shareMessage({
+      title: 'Purchase Order',
+      text: msg,
+      phone: phone || undefined,
+      preferNative: !phone,
+      copiedMessage: 'Copied to clipboard'
+    });
   }, [vendorMap]);
 
   const handleRetrySuccess = useCallback((dbId: number, poId: string) => {

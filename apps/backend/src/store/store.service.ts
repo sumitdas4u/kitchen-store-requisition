@@ -522,7 +522,7 @@ export class StoreService implements OnModuleInit {
   // ── CRUD helpers ──────────────────────────────────────────────────────────────
 
   async listRequisitions() { return this.requisitionService.listForStore() }
-  async getRequisition(id: number) { return this.requisitionService.getOne(id) }
+  async getRequisition(id: number) { return this.requisitionService.getOneForStore(id) }
   async getStock(warehouse: string) { return this.erpService.getBinStock(warehouse) }
   async listVendorOverrides() { return this.vendorOverrideRepo.find() }
 

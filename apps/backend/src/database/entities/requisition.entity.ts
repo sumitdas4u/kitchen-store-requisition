@@ -8,7 +8,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn
 } from 'typeorm'
-import { RequisitionStatus, Shift } from '../../common/enums'
+import { RequisitionStatus, Shift, StockEntrySyncStatus } from '../../common/enums'
 import { User } from './user.entity'
 import { RequisitionItem } from './requisition-item.entity'
 
@@ -49,6 +49,19 @@ export class Requisition {
 
   @Column({ type: 'varchar', length: 100, nullable: true })
   stock_entry: string | null
+
+  @Column({
+    type: 'varchar',
+    length: 30,
+    default: StockEntrySyncStatus.NotStarted
+  })
+  stock_entry_status: StockEntrySyncStatus
+
+  @Column({ type: 'text', nullable: true })
+  stock_entry_error_message: string | null
+
+  @Column({ type: 'timestamp', nullable: true })
+  stock_entry_last_attempt_at: Date | null
 
   @Column({ type: 'varchar', length: 100, nullable: true })
   queue_job_id: string | null

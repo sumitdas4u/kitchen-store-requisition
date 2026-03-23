@@ -217,18 +217,28 @@ export function NewTransferPage() {
 
   const addItem = (item: any) => {
     if (inCart(item.item_code)) return;
+    const stockQty = Number(item.stock_qty || 0);
+    if (stockQty <= 0) {
+      setSubmitErr(`No stock available in store for ${item.item_name || item.item_code}.`);
+      return;
+    }
+    setSubmitErr(null);
     setCart(prev => [...prev, {
       item_code: item.item_code,
       item_name: item.item_name || item.item_code,
       uom:       item.uom || '',
-      qty:       1,
-      stock_qty: Number(item.stock_qty || 0),
+      qty:       Math.min(1, stockQty),
+      stock_qty: stockQty,
     }]);
   };
 
   const removeItem = (code: string) => setCart(prev => prev.filter(c => c.item_code !== code));
   const setQty = (code: string, qty: number) =>
-    setCart(prev => prev.map(c => c.item_code === code ? { ...c, qty: Math.max(0.5, n3(qty)) } : c));
+    setCart(prev => prev.map(c =>
+      c.item_code === code
+        ? { ...c, qty: Math.max(0.001, Math.min(n3(qty), Number(c.stock_qty || 0))) }
+        : c
+    ));
 
   const totalQty = useMemo(() => cart.reduce((s, c) => s + c.qty, 0), [cart]);
 
@@ -237,6 +247,10 @@ export function NewTransferPage() {
     setSubmitting(true);
     setSubmitErr(null);
     try {
+      const invalidLine = cart.find((item) => Number(item.qty || 0) > Number(item.stock_qty || 0));
+      if (invalidLine) {
+        throw new Error(`Transfer qty cannot exceed store stock for ${invalidLine.item_name}.`);
+      }
       const res = await apiRequest<any>('/store/transfer/create', 'POST', {
         target_warehouse: effectiveTarget,
         note: note || undefined,
@@ -388,11 +402,13 @@ export function NewTransferPage() {
                           <div style={{ flex:1 }}>
                             <div className="srr-name">{item.item_name || item.item_code}</div>
                             <div className="srr-sub">
-                              {item.stock_qty > 0 ? `In store: ${item.stock_qty} ${item.uom}` : 'Stock unknown'}
+                              {item.stock_qty > 0 ? `In store: ${item.stock_qty} ${item.uom}` : 'No stock in store'}
                               {item.last_po_date ? ` · ${item.last_po_date}` : ''}
                             </div>
                           </div>
                           <button className={`srr-add-btn ${added ? 'in-cart' : ''}`}
+                            disabled={!added && Number(item.stock_qty || 0) <= 0}
+                            style={!added && Number(item.stock_qty || 0) <= 0 ? { opacity: 0.45, cursor: 'not-allowed' } : undefined}
                             onClick={() => added ? removeItem(item.item_code) : addItem(item)}>
                             {added ? '✓' : '+'}
                           </button>
@@ -413,7 +429,12 @@ export function NewTransferPage() {
                 </div>
                 {cart.map(item => (
                   <div key={item.item_code} className="cart-item-row">
-                    <span className="cir-name">{item.item_name}</span>
+                    <div style={{ flex:1 }}>
+                      <span className="cir-name">{item.item_name}</span>
+                      <div style={{ fontSize:10, fontWeight:800, color:'var(--lt)', marginTop:2 }}>
+                        Available: {Number(item.stock_qty || 0).toFixed(3)} {item.uom}
+                      </div>
+                    </div>
                     <div className="qty-ctrl">
                       <button className="qty-btn"
                         onPointerDown={e => { e.preventDefault(); setQty(item.item_code, item.qty - 0.5); }}>−</button>
@@ -421,7 +442,7 @@ export function NewTransferPage() {
                         value={item.qty}
                         onChange={e => setQty(item.item_code, parseFloat(e.target.value) || 0)}
                         onFocus={e => e.target.select()} />
-                      <button className="qty-btn add"
+                      <button className="qty-btn add" disabled={item.qty >= Number(item.stock_qty || 0)}
                         onPointerDown={e => { e.preventDefault(); setQty(item.item_code, item.qty + 0.5); }}>+</button>
                     </div>
                     <span className="qty-unit">{item.uom}</span>
@@ -458,7 +479,12 @@ export function NewTransferPage() {
               </div>
               {cart.map(item => (
                 <div key={item.item_code} className="cart-item-row">
-                  <span className="cir-name">{item.item_name}</span>
+                  <div style={{ flex:1 }}>
+                    <span className="cir-name">{item.item_name}</span>
+                    <div style={{ fontSize:10, fontWeight:800, color:'var(--lt)', marginTop:2 }}>
+                      Available: {Number(item.stock_qty || 0).toFixed(3)} {item.uom}
+                    </div>
+                  </div>
                   <div className="qty-ctrl">
                     <button className="qty-btn"
                       onPointerDown={e => { e.preventDefault(); setQty(item.item_code, item.qty - 0.5); }}>−</button>
@@ -466,7 +492,7 @@ export function NewTransferPage() {
                       value={item.qty}
                       onChange={e => setQty(item.item_code, parseFloat(e.target.value) || 0)}
                       onFocus={e => e.target.select()} />
-                    <button className="qty-btn add"
+                    <button className="qty-btn add" disabled={item.qty >= Number(item.stock_qty || 0)}
                       onPointerDown={e => { e.preventDefault(); setQty(item.item_code, item.qty + 0.5); }}>+</button>
                   </div>
                   <span className="qty-unit">{item.uom}</span>

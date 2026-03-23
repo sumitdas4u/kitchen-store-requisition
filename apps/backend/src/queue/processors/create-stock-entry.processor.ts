@@ -2,6 +2,7 @@ import { Processor, WorkerHost } from '@nestjs/bullmq'
 import { Job } from 'bullmq'
 import { Injectable } from '@nestjs/common'
 import { QUEUE_NAMES } from '../../common/constants'
+import { StockEntrySyncStatus } from '../../common/enums'
 import { ErpService } from '../../erp/erp.service'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
@@ -16,6 +17,17 @@ export class CreateStockEntryProcessor extends WorkerHost {
     private readonly requisitionsRepo: Repository<Requisition>
   ) {
     super()
+  }
+
+  private extractErpError(error: any, fallback = 'ERP sync failed') {
+    const raw = error?.response?.data
+    return (
+      raw?.exception ||
+      raw?.message ||
+      (typeof raw === 'string' ? raw : null) ||
+      error?.message ||
+      fallback
+    )
   }
 
   async process(job: Job<{ requisitionId: string }>) {
@@ -54,10 +66,27 @@ export class CreateStockEntryProcessor extends WorkerHost {
       }))
     }
 
-    const stockEntryName = await this.erpService.createStockEntryDraft(payload)
-    requisition.stock_entry = stockEntryName
-    await this.requisitionsRepo.save(requisition)
+    try {
+      const stockEntryName = await this.erpService.createStockEntryDraft(payload)
+      requisition.stock_entry = stockEntryName
+      requisition.stock_entry_status = StockEntrySyncStatus.DraftCreated
+      requisition.stock_entry_error_message = null
+      requisition.stock_entry_last_attempt_at = new Date()
+      requisition.erp_synced = true
+      requisition.last_synced_at = new Date()
+      await this.requisitionsRepo.save(requisition)
 
-    return stockEntryName
+      return stockEntryName
+    } catch (error: any) {
+      requisition.stock_entry_status = StockEntrySyncStatus.Failed
+      requisition.stock_entry_error_message = this.extractErpError(
+        error,
+        'Failed to create Stock Entry draft'
+      )
+      requisition.stock_entry_last_attempt_at = new Date()
+      requisition.erp_synced = false
+      await this.requisitionsRepo.save(requisition)
+      throw error
+    }
   }
 }

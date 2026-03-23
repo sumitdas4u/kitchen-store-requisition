@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { apiRequest } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
+import { shareMessage } from '../../../lib/share';
 
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&family=DM+Mono:wght@500;600&display=swap');
@@ -135,15 +136,6 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 const COLORS = ['#16A34A','#F97316','#EF4444','#0EA5E9','#8B5CF6','#1D4ED8'];
 const getColor = (s: string) => COLORS[Math.abs((s || '').split('').reduce((a,c) => a + c.charCodeAt(0), 0)) % COLORS.length];
 const n3 = (v: number) => parseFloat(Number(v).toFixed(3));
-const shareOnWhatsApp = (title: string, text: string) => {
-  const payload = `${title}\n${text}`.trim();
-  if (navigator.share) {
-    navigator.share({ title, text: payload }).catch(() => {});
-    return;
-  }
-  window.open(`https://wa.me/?text=${encodeURIComponent(payload)}`, '_blank');
-};
-
 export function IssueItem() {
   const router = useRouter();
   const params = useParams();
@@ -172,7 +164,9 @@ export function IssueItem() {
       const pre: Record<string, number> = {};
       (req?.items || []).forEach((item: any) => {
         const remaining = Math.max(0, Number(item.requested_qty) - Number(item.issued_qty || 0));
-        if (remaining > 0) pre[item.item_code] = remaining;
+        const available = Number(map.get(item.item_code) ?? 0);
+        const maxIssuable = Math.max(0, Math.min(remaining, available));
+        if (maxIssuable > 0) pre[item.item_code] = maxIssuable;
       });
       setIssued(pre);
     }).catch(() => setRequisition(null));
@@ -196,6 +190,17 @@ export function IssueItem() {
     setLoading(true);
     setError(null);
     try {
+      const invalidLine = (requisition.items || []).find((item: any) => {
+        const requested = Number(item.requested_qty || 0);
+        const alreadyIssued = Number(item.issued_qty || 0);
+        const remaining = Math.max(0, requested - alreadyIssued);
+        const available = Number(stockMap.get(item.item_code) ?? 0);
+        const qty = Number(issued[item.item_code] ?? 0);
+        return qty > Math.min(remaining, available);
+      });
+      if (invalidLine) {
+        throw new Error(`Issue qty cannot exceed store stock for ${invalidLine.item_name || invalidLine.item_code}.`);
+      }
       await apiRequest(`/requisition/${id}/issue`, 'PUT', {
         items: requisition.items.map((item: any) => ({
           item_code:  item.item_code,
@@ -239,7 +244,10 @@ export function IssueItem() {
       lines.push('', `Note: ${note}`);
     }
 
-    shareOnWhatsApp(`TR-${id} issued`, lines.join('\n'));
+    void shareMessage({
+      title: `TR-${id} issued`,
+      text: lines.join('\n')
+    });
   };
 
   if (!token) return null;
@@ -315,11 +323,12 @@ export function IssueItem() {
           const alreadyIss = Number(item.issued_qty || 0);
           const remaining  = Math.max(0, requested - alreadyIss);
           const available  = stockMap.get(item.item_code) ?? 0;
+          const maxIssuable = Math.max(0, Math.min(remaining, available));
           const qty        = issued[item.item_code] ?? 0;
           const isDone     = remaining === 0;
 
           const setQty = (v: number) =>
-            setIssued(prev => ({ ...prev, [item.item_code]: Math.max(0, Math.min(n3(v), remaining)) }));
+            setIssued(prev => ({ ...prev, [item.item_code]: Math.max(0, Math.min(n3(v), maxIssuable)) }));
 
           return (
             <div key={item.item_code} className={`item-card fade ${isDone ? 'done' : ''}`}>
@@ -354,15 +363,25 @@ export function IssueItem() {
                       value={qty}
                       onChange={e => setQty(parseFloat(e.target.value) || 0)}
                       onFocus={e => e.target.select()} />
-                    <button className="qty-btn add" disabled={qty >= remaining}
+                    <button className="qty-btn add" disabled={qty >= maxIssuable || maxIssuable === 0}
                       onPointerDown={e => { e.preventDefault(); setQty(qty + 0.5); }}>+</button>
                   </div>
                   <span className="qty-unit">{item.uom}</span>
-                  {qty < remaining && (
-                    <button className="qty-fill-btn" onClick={() => setQty(remaining)}>
-                      Fill ({remaining})
+                  {qty < maxIssuable && (
+                    <button className="qty-fill-btn" onClick={() => setQty(maxIssuable)}>
+                      Fill ({maxIssuable})
                     </button>
                   )}
+                </div>
+              )}
+              {!isDone && available <= 0 && (
+                <div style={{ padding:'0 14px 14px', color:'var(--rd)', fontSize:12, fontWeight:800 }}>
+                  Store stock is 0. This item cannot be issued right now.
+                </div>
+              )}
+              {!isDone && available > 0 && available < remaining && (
+                <div style={{ padding:'0 14px 14px', color:'#92400E', fontSize:12, fontWeight:800 }}>
+                  Only {available.toFixed(1)} {item.uom} available in store right now.
                 </div>
               )}
             </div>

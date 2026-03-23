@@ -8,6 +8,7 @@ import { ErpModule } from '../erp/erp.module'
 import { UsersModule } from '../users/users.module'
 import { Requisition } from '../database/entities/requisition.entity'
 import { RequisitionItem } from '../database/entities/requisition-item.entity'
+import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entity'
 import { ErpWarehouseCache } from '../database/entities/erp-warehouse-cache.entity'
 
 @Module({
@@ -16,7 +17,12 @@ import { ErpWarehouseCache } from '../database/entities/erp-warehouse-cache.enti
     NotificationsModule,
     ErpModule,
     UsersModule,
-    TypeOrmModule.forFeature([Requisition, RequisitionItem, ErpWarehouseCache])
+    TypeOrmModule.forFeature([
+      Requisition,
+      RequisitionItem,
+      ErpBinStockCache,
+      ErpWarehouseCache
+    ])
   ],
   controllers: [RequisitionController],
   providers: [RequisitionService],

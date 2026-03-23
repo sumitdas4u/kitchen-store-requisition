@@ -18,3 +18,12 @@ export enum Shift {
   Morning = 'Morning',
   Evening = 'Evening'
 }
+
+export enum StockEntrySyncStatus {
+  NotStarted = 'not_started',
+  DraftPending = 'draft_pending',
+  DraftCreated = 'draft_created',
+  SubmitPending = 'submit_pending',
+  Submitted = 'submitted',
+  Failed = 'failed'
+}

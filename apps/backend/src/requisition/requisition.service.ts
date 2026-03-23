@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger, UnauthorizedException } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { In, Repository } from 'typeorm'
-import { RequisitionStatus, Role } from '../common/enums'
+import { RequisitionStatus, Role, StockEntrySyncStatus } from '../common/enums'
 import { QueueService } from '../queue/queue.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { ErpService } from '../erp/erp.service'
@@ -10,6 +10,7 @@ import { IssueRequisitionDto } from './dto/issue-requisition.dto'
 import { ConfirmRequisitionDto } from './dto/confirm-requisition.dto'
 import { Requisition } from '../database/entities/requisition.entity'
 import { RequisitionItem } from '../database/entities/requisition-item.entity'
+import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entity'
 import { ErpWarehouseCache } from '../database/entities/erp-warehouse-cache.entity'
 import {
   assertRequisitionActionAllowed,
@@ -30,6 +31,8 @@ export class RequisitionService {
     private readonly requisitionsRepo: Repository<Requisition>,
     @InjectRepository(RequisitionItem)
     private readonly requisitionItemsRepo: Repository<RequisitionItem>,
+    @InjectRepository(ErpBinStockCache)
+    private readonly binStockCacheRepo: Repository<ErpBinStockCache>,
     @InjectRepository(ErpWarehouseCache)
     private readonly warehouseCacheRepo: Repository<ErpWarehouseCache>,
     private readonly queueService: QueueService,
@@ -141,6 +144,189 @@ export class RequisitionService {
     )
   }
 
+  private getStoreVisibleItems(items: RequisitionItem[]) {
+    return items
+      .filter((item) => Number(item.requested_qty || 0) > 0)
+      .map((item) => ({ ...item }))
+  }
+
+  private toStoreVisibleRequisition(requisition: Requisition): Requisition {
+    return {
+      ...requisition,
+      items: this.getStoreVisibleItems(requisition.items || [])
+    }
+  }
+
+  private extractErpError(error: any, fallback = 'ERP sync failed') {
+    const raw = error?.response?.data
+    return (
+      raw?.exception ||
+      raw?.message ||
+      (typeof raw === 'string' ? raw : null) ||
+      error?.message ||
+      fallback
+    )
+  }
+
+  private async getWarehouseStockMap(warehouse: string) {
+    const stockMap = new Map<string, number>()
+    if (!warehouse) {
+      return stockMap
+    }
+
+    try {
+      const rows = await this.erpService.getBinStock(warehouse)
+      rows.forEach((row) => {
+        stockMap.set(row.item_code, Number(row.actual_qty || 0))
+      })
+      return stockMap
+    } catch (error) {
+      this.logger.warn(
+        `Falling back to cached stock for ${warehouse}: ${this.extractErpError(error)}`
+      )
+    }
+
+    const cachedRows = await this.binStockCacheRepo.find({ where: { warehouse } })
+    cachedRows.forEach((row) => {
+      stockMap.set(row.item_code, Number(row.actual_qty || 0))
+    })
+    return stockMap
+  }
+
+  private assertPositiveQty(value: number, itemCode: string, fieldName: string) {
+    if (value < 0) {
+      throw new BadRequestException(
+        `${fieldName} must be 0 or greater for ${itemCode}`
+      )
+    }
+  }
+
+  private async assertSufficientSourceStock(
+    warehouse: string,
+    requestedByItem: Map<string, number>
+  ) {
+    if (requestedByItem.size === 0) {
+      return
+    }
+
+    const stockMap = await this.getWarehouseStockMap(warehouse)
+    requestedByItem.forEach((requestedQty, itemCode) => {
+      const availableQty = Number(stockMap.get(itemCode) || 0)
+      if (requestedQty > availableQty) {
+        throw new BadRequestException(
+          `Cannot issue ${requestedQty} of ${itemCode}. Only ${availableQty} available in ${warehouse}`
+        )
+      }
+    })
+  }
+
+  private buildIssuedDeltaMap(
+    items: Array<{ item_code: string; issued_qty: number }>
+  ) {
+    const requestedByItem = new Map<string, number>()
+
+    items.forEach((item) => {
+      const issuedQty = Number(item.issued_qty || 0)
+      this.assertPositiveQty(issuedQty, item.item_code, 'issued_qty')
+      if (issuedQty <= 0) {
+        return
+      }
+
+      requestedByItem.set(
+        item.item_code,
+        Number(requestedByItem.get(item.item_code) || 0) + issuedQty
+      )
+    })
+
+    return requestedByItem
+  }
+
+  private buildTransferQtyMap(
+    items: Array<{ item_code: string; qty: number }>
+  ) {
+    const requestedByItem = new Map<string, number>()
+
+    items.forEach((item) => {
+      const qty = Number(item.qty || 0)
+      if (qty <= 0) {
+        throw new BadRequestException(
+          `qty must be greater than 0 for ${item.item_code}`
+        )
+      }
+
+      requestedByItem.set(
+        item.item_code,
+        Number(requestedByItem.get(item.item_code) || 0) + qty
+      )
+    })
+
+    return requestedByItem
+  }
+
+  private setStockEntrySyncState(
+    requisition: Requisition,
+    status: StockEntrySyncStatus,
+    errorMessage: string | null = null
+  ) {
+    requisition.stock_entry_status = status
+    requisition.stock_entry_error_message = errorMessage
+    requisition.stock_entry_last_attempt_at = new Date()
+  }
+
+  private buildStockEntryPayload(
+    requisition: Requisition,
+    items: Array<{
+      item_code: string
+      item_name?: string | null
+      qty: number
+      uom?: string | null
+    }>
+  ) {
+    const mrItemMap = new Map(
+      requisition.items
+        .filter((item) => item.erp_mr_item_name)
+        .map((item) => [item.item_code, item.erp_mr_item_name!])
+    )
+
+    return {
+      doctype: 'Stock Entry',
+      stock_entry_type: 'Material Transfer',
+      company: requisition.company,
+      docstatus: 0,
+      from_warehouse: requisition.source_warehouse,
+      to_warehouse: requisition.warehouse,
+      remarks: `KR-${requisition.id} | ${requisition.warehouse} | ${requisition.requested_date}`,
+      items: items.map((item) => ({
+        item_code: item.item_code,
+        item_name: item.item_name ?? null,
+        qty: Number(item.qty),
+        uom: item.uom ?? null,
+        stock_uom: item.uom ?? null,
+        s_warehouse: requisition.source_warehouse,
+        t_warehouse: requisition.warehouse,
+        conversion_factor: 1,
+        ...(requisition.erp_name ? { material_request: requisition.erp_name } : {}),
+        ...(mrItemMap.get(item.item_code)
+          ? { material_request_item: mrItemMap.get(item.item_code) }
+          : {})
+      }))
+    }
+  }
+
+  private getRetryableStockEntryItems(requisition: Requisition) {
+    return requisition.items
+      .filter((item) => Number(item.received_qty) > 0 || Number(item.issued_qty) > 0)
+      .map((item) => ({
+        item_code: item.item_code,
+        item_name: item.item_name,
+        qty:
+          Number(item.received_qty) > 0
+            ? Number(item.received_qty)
+            : Number(item.issued_qty),
+        uom: item.uom
+      }))
+  }
+
   /**
    * Completion keeps the existing ERP behavior:
    * - submit an already-created Stock Entry draft
@@ -148,9 +334,18 @@ export class RequisitionService {
    */
   private async enqueueCompletionSync(requisition: Requisition) {
     if (requisition.stock_entry) {
+      this.setStockEntrySyncState(
+        requisition,
+        StockEntrySyncStatus.SubmitPending,
+        null
+      )
+      await this.requisitionsRepo.save(requisition)
       await this.queueService.enqueueErpWrite('submit_stock_entry', {
         action: 'submit_stock_entry',
-        payload: { name: requisition.stock_entry }
+        payload: {
+          name: requisition.stock_entry,
+          requisition_id: requisition.id
+        }
       })
       return
     }
@@ -159,6 +354,12 @@ export class RequisitionService {
       (item) => Number(item.received_qty) > 0 || Number(item.issued_qty) > 0
     )
     if (hasActivity) {
+      this.setStockEntrySyncState(
+        requisition,
+        StockEntrySyncStatus.DraftPending,
+        null
+      )
+      await this.requisitionsRepo.save(requisition)
       await this.queueService.enqueueCreateStockEntry({
         requisitionId: String(requisition.id)
       })
@@ -472,12 +673,16 @@ export class RequisitionService {
       relations: ['items'],
       order: { requested_date: 'DESC' }
     })
-    return results.filter((req) =>
-      req.items.some((item) => Number(item.requested_qty) > 0) &&
-      req.items.some(
-        (item) => Number(item.requested_qty) > Number(item.received_qty || 0)
+    return results
+      .map((req) => this.toStoreVisibleRequisition(req))
+      .filter(
+        (req) =>
+          req.items.length > 0 &&
+          req.items.some(
+            (item) =>
+              Number(item.requested_qty) > Number(item.received_qty || 0)
+          )
       )
-    )
   }
 
   async getOne(requisitionId: number) {
@@ -491,6 +696,15 @@ export class RequisitionService {
     return requisition
   }
 
+  async getOneForStore(requisitionId: number) {
+    const requisition = await this.getOne(requisitionId)
+    const visible = this.toStoreVisibleRequisition(requisition)
+    if (visible.items.length === 0) {
+      throw new BadRequestException('Requisition has no requested items for store')
+    }
+    return visible
+  }
+
   // â”€â”€ Issue (Store) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async issue(requisitionId: number, dto: IssueRequisitionDto) {
@@ -501,6 +715,11 @@ export class RequisitionService {
       'Requisition is not ready to issue'
     )
     const itemMap = new Map(requisition.items.map((item) => [item.item_code, item]))
+    const issuedDeltaMap = this.buildIssuedDeltaMap(dto.items || [])
+    await this.assertSufficientSourceStock(
+      requisition.source_warehouse,
+      issuedDeltaMap
+    )
 
     const issuedItems: { item_code: string; item_name: string | null; qty: number; uom: string | null }[] = []
 
@@ -511,11 +730,6 @@ export class RequisitionService {
       }
       const issuedTotal = Number(existing.issued_qty)
       const issuedDelta = Number(item.issued_qty)
-      if (issuedDelta < 0) {
-        throw new BadRequestException(
-          `issued_qty must be 0 or greater for ${item.item_code}`
-        )
-      }
       const nextIssued = issuedTotal + issuedDelta
       if (nextIssued > Number(existing.requested_qty)) {
         throw new BadRequestException(
@@ -568,6 +782,7 @@ export class RequisitionService {
       )
 
       const company = await this.getEffectiveRequisitionCompany(requisition)
+      requisition.company = company
       const sePayload = {
         doctype: 'Stock Entry',
         stock_entry_type: 'Material Transfer',
@@ -594,11 +809,29 @@ export class RequisitionService {
       try {
         const seName = await this.erpService.createStockEntryDraft(sePayload)
         requisition.stock_entry = seName
+        this.setStockEntrySyncState(
+          requisition,
+          StockEntrySyncStatus.DraftCreated,
+          null
+        )
         requisition.erp_synced = true
         requisition.last_synced_at = new Date()
         await this.requisitionsRepo.save(requisition)
       } catch (err: any) {
-        this.logger.warn(`Failed to create Stock Entry for requisition ${requisitionId}: ${err.message}`)
+        const errorMessage = this.extractErpError(
+          err,
+          'Failed to create Stock Entry draft'
+        )
+        this.setStockEntrySyncState(
+          requisition,
+          StockEntrySyncStatus.Failed,
+          errorMessage
+        )
+        requisition.erp_synced = false
+        await this.requisitionsRepo.save(requisition)
+        this.logger.warn(
+          `Failed to create Stock Entry for requisition ${requisitionId}: ${errorMessage}`
+        )
       }
     }
 
@@ -762,14 +995,18 @@ export class RequisitionService {
   // â”€â”€ Store-initiated transfer (no kitchen request needed) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async listSentTransfers(sourceWarehouse: string): Promise<Requisition[]> {
-    return this.requisitionsRepo.find({
+    const results = await this.requisitionsRepo.find({
       where: [
         { source_warehouse: sourceWarehouse, status: RequisitionStatus.Issued },
+        { source_warehouse: sourceWarehouse, status: RequisitionStatus.PartiallyIssued },
         { source_warehouse: sourceWarehouse, status: RequisitionStatus.Completed },
       ],
       relations: ['items'],
       order: { created_at: 'DESC' },
     })
+    return results
+      .map((req) => this.toStoreVisibleRequisition(req))
+      .filter((req) => req.items.length > 0)
   }
 
   async listKitchenWarehouses(): Promise<string[]> {
@@ -787,6 +1024,11 @@ export class RequisitionService {
   ) {
     if (!dto.target_warehouse) throw new BadRequestException('Target warehouse required')
     if (!dto.items?.length)    throw new BadRequestException('At least one item required')
+    const requestedByItem = this.buildTransferQtyMap(dto.items)
+    await this.assertSufficientSourceStock(
+      user.source_warehouse,
+      requestedByItem
+    )
 
     const today = new Date().toISOString().split('T')[0]
     const company = await this.resolveCompanyFromWarehouses(
@@ -835,6 +1077,7 @@ export class RequisitionService {
       const mrName = await this.erpService.createMaterialRequestDraft(mrPayload)
       saved.erp_name = mrName
       await this.erpService.submitMaterialRequest(mrName)
+      await this.requisitionsRepo.save(saved)
 
       // 2. Fetch MR item row names for linking
       const mrDoc = await this.erpService.getMaterialRequest(mrName)
@@ -882,11 +1125,23 @@ export class RequisitionService {
       }
       erpDraft = await this.erpService.createStockEntryDraft(sePayload)
       saved.stock_entry = erpDraft
+      this.setStockEntrySyncState(
+        saved,
+        StockEntrySyncStatus.DraftCreated,
+        null
+      )
       saved.erp_synced = true
       saved.last_synced_at = new Date()
       await this.requisitionsRepo.save(saved)
     } catch (e: any) {
-      erpError = e?.message ?? 'ERP draft creation failed'
+      erpError = this.extractErpError(e, 'ERP draft creation failed')
+      this.setStockEntrySyncState(
+        saved,
+        StockEntrySyncStatus.Failed,
+        erpError
+      )
+      saved.erp_synced = false
+      await this.requisitionsRepo.save(saved)
       this.logger.warn(`Store transfer ERP sync failed for KR-${saved.id}: ${erpError}`)
     }
 
@@ -896,7 +1151,89 @@ export class RequisitionService {
       warehouse: dto.target_warehouse,
       items: dto.items.length,
       erp_draft: erpDraft,
-      erp_error: erpError
+      erp_error: erpError,
+      stock_entry_status: saved.stock_entry_status,
+      stock_entry_error_message: saved.stock_entry_error_message
+    }
+  }
+
+  async retryStockEntry(requisitionId: number) {
+    const requisition = await this.getOne(requisitionId)
+    if (requisition.stock_entry_status !== StockEntrySyncStatus.Failed) {
+      throw new BadRequestException('Only failed stock entries can be retried')
+    }
+
+    const retryItems = this.getRetryableStockEntryItems(requisition)
+    if (retryItems.length === 0) {
+      throw new BadRequestException('No issued or received items available for Stock Entry sync')
+    }
+
+    try {
+      requisition.company = await this.getEffectiveRequisitionCompany(requisition)
+
+      if (requisition.stock_entry) {
+        this.setStockEntrySyncState(
+          requisition,
+          StockEntrySyncStatus.SubmitPending,
+          null
+        )
+        await this.requisitionsRepo.save(requisition)
+        await this.erpService.submitStockEntry(requisition.stock_entry)
+        this.setStockEntrySyncState(
+          requisition,
+          StockEntrySyncStatus.Submitted,
+          null
+        )
+      } else {
+        const stockEntryName = await this.erpService.createStockEntryDraft(
+          this.buildStockEntryPayload(requisition, retryItems)
+        )
+        requisition.stock_entry = stockEntryName
+
+        if (requisition.status === RequisitionStatus.Completed) {
+          await this.erpService.submitStockEntry(stockEntryName)
+          this.setStockEntrySyncState(
+            requisition,
+            StockEntrySyncStatus.Submitted,
+            null
+          )
+        } else {
+          this.setStockEntrySyncState(
+            requisition,
+            StockEntrySyncStatus.DraftCreated,
+            null
+          )
+        }
+      }
+
+      requisition.erp_synced = true
+      requisition.last_synced_at = new Date()
+      await this.requisitionsRepo.save(requisition)
+
+      return {
+        success: true,
+        stock_entry: requisition.stock_entry,
+        stock_entry_status: requisition.stock_entry_status
+      }
+    } catch (error: any) {
+      const errorMessage = this.extractErpError(
+        error,
+        'Failed to retry Stock Entry sync'
+      )
+      this.setStockEntrySyncState(
+        requisition,
+        StockEntrySyncStatus.Failed,
+        errorMessage
+      )
+      requisition.erp_synced = false
+      await this.requisitionsRepo.save(requisition)
+
+      return {
+        success: false,
+        error: errorMessage,
+        stock_entry: requisition.stock_entry ?? null,
+        stock_entry_status: requisition.stock_entry_status
+      }
     }
   }
 }

@@ -181,4 +181,9 @@ export class StoreController {
       body
     )
   }
+
+  @Post('transfer/retry-stock-entry/:id')
+  async retryStockEntry(@Param('id') id: string) {
+    return this.requisitionService.retryStockEntry(Number(id))
+  }
 }

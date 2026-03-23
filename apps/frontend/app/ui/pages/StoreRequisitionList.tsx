@@ -118,6 +118,22 @@ function statusPill(status: string) {
   return <span className="status-pill submitted">{status}</span>;
 }
 
+function stockEntryBadgeMeta(status?: string | null) {
+  switch (status) {
+    case 'submitted':
+      return { label: 'Submitted', color: 'var(--gn)', bg: 'var(--gnbg)' };
+    case 'draft_created':
+      return { label: 'Draft Ready', color: 'var(--bl)', bg: 'var(--blbg)' };
+    case 'draft_pending':
+    case 'submit_pending':
+      return { label: 'Syncing', color: 'var(--am)', bg: 'var(--ambg)' };
+    case 'failed':
+      return { label: 'Failed', color: 'var(--rd)', bg: 'var(--rdbg)' };
+    default:
+      return { label: 'Pending', color: 'var(--md)', bg: 'var(--lnlt)' };
+  }
+}
+
 function BottomNav() {
   const pathname = usePathname();
   const router   = useRouter();
@@ -149,6 +165,7 @@ export function StoreRequisitionList() {
   const [sent,   setSent  ] = useState<any[]>([]);
   const [tab,    setTab   ] = useState<Tab>('pending');
   const [loading,setLoading] = useState(true);
+  const [retryingId, setRetryingId] = useState<number | null>(null);
 
   const load = useCallback(() => {
     if (!token) return;
@@ -166,6 +183,17 @@ export function StoreRequisitionList() {
   }, [token]);
 
   useEffect(() => { load(); }, [load]);
+
+  const retryStockEntry = async (id: number) => {
+    if (!token) return;
+    setRetryingId(id);
+    try {
+      await apiRequest(`/store/transfer/retry-stock-entry/${id}`, 'POST', undefined, token);
+      load();
+    } finally {
+      setRetryingId(null);
+    }
+  };
 
   if (!token) return null;
 
@@ -232,6 +260,7 @@ export function StoreRequisitionList() {
           const isComplete = req.status === 'Completed';
           const color      = getColor(req.warehouse || String(req.id));
           const hdrColor   = isComplete ? '#6B7280' : color;
+          const stockEntryMeta = stockEntryBadgeMeta(req.stock_entry_status);
 
           return (
             <div key={req.id} className="tr-card fade">
@@ -259,6 +288,45 @@ export function StoreRequisitionList() {
                     {req.items?.length ?? 0} items
                   </span>
                 </div>
+                {tab === 'sent' && (
+                  <>
+                    <div className="tr-row">
+                      <span className="tr-label">ERP Stock Entry</span>
+                      <span className="tr-value">{req.stock_entry || 'Not created'}</span>
+                    </div>
+                    <div className="tr-row">
+                      <span className="tr-label">ERP Sync</span>
+                      <span
+                        style={{
+                          padding: '3px 8px',
+                          borderRadius: 999,
+                          fontSize: 10,
+                          fontWeight: 800,
+                          color: stockEntryMeta.color,
+                          background: stockEntryMeta.bg
+                        }}
+                      >
+                        {stockEntryMeta.label}
+                      </span>
+                    </div>
+                    {req.stock_entry_error_message && (
+                      <div
+                        style={{
+                          marginTop: 6,
+                          padding: '10px 12px',
+                          borderRadius: 10,
+                          background: 'var(--rdbg)',
+                          color: 'var(--rd)',
+                          fontSize: 12,
+                          fontWeight: 800,
+                          lineHeight: 1.45
+                        }}
+                      >
+                        ERP Error: {req.stock_entry_error_message}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
 
               {req.items?.length > 0 && (
@@ -292,6 +360,14 @@ export function StoreRequisitionList() {
                   <button className="tr-issue-btn grey"
                     onClick={() => router.push(`/store/issue/${req.id}`)}>
                     ✓ Completed — View
+                  </button>
+                )}
+                {tab === 'sent' && req.stock_entry_status === 'failed' && (
+                  <button
+                    className="tr-issue-btn"
+                    disabled={retryingId === req.id}
+                    onClick={() => retryStockEntry(req.id)}>
+                    {retryingId === req.id ? 'Retrying ERP...' : 'Retry Stock Entry'}
                   </button>
                 )}
               </div>

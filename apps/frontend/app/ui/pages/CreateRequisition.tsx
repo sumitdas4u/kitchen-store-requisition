@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { apiRequest } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
 import { getDefaultWarehouse, getSourceWarehouse } from '../../../lib/session';
+import { shareMessage } from '../../../lib/share';
 
 type ShiftValue = 'Morning' | 'Evening';
 
@@ -736,8 +737,10 @@ function Success({
       ``,
       `✅ Store ko bhej diya`
     ].join('\n');
-    if (navigator.share) navigator.share({ title: `Order ${requisitionId}`, text: lines }).catch(() => {});
-    else window.open(`https://wa.me/?text=${encodeURIComponent(lines)}`, '_blank');
+    void shareMessage({
+      title: `Order ${requisitionId}`,
+      text: lines
+    });
   };
 
   return (
@@ -820,13 +823,6 @@ export function CreateRequisition() {
   const [draftId, setDraftId] = useState<number | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const [notes, setNotes] = useState('');
-  const [debugSample, setDebugSample] = useState<{
-    code?: string;
-    itemQty?: number;
-    itemRate?: number;
-    stockQty?: number;
-    stockRate?: number;
-  } | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -846,21 +842,6 @@ export function CreateRequisition() {
         setStockList(stockData || []);
         setMappedGroups(groupsData || []);
         setError(null);
-        const sampleItem = itemsData?.[0];
-        const sampleStock = stockData?.find(
-          (row) => row.item_code === sampleItem?.name
-        );
-        setDebugSample(
-          sampleItem
-            ? {
-                code: sampleItem.name,
-                itemQty: sampleItem.actual_qty ?? undefined,
-                itemRate: sampleItem.valuation_rate ?? undefined,
-                stockQty: sampleStock?.actual_qty ?? undefined,
-                stockRate: sampleStock?.valuation_rate ?? undefined
-              }
-            : null
-        );
       })
       .catch((err) => setError((err as Error).message));
   }, [token, resolvedWarehouse, companyParam]);
@@ -1097,50 +1078,20 @@ export function CreateRequisition() {
 
   if (screen === 'browse') {
     return (
-      <>
-        <Browse
-          date={requestedDate}
-          setDate={setRequestedDate}
-          shift={shift}
-          setShift={setShift}
-          actuals={actuals}
-          setActuals={setActuals}
-          orders={orders}
-          setOrders={setOrders}
-          groups={groups}
-          onReview={() => setScreen('confirm')}
+      <Browse
+        date={requestedDate}
+        setDate={setRequestedDate}
+        shift={shift}
+        setShift={setShift}
+        actuals={actuals}
+        setActuals={setActuals}
+        orders={orders}
+        setOrders={setOrders}
+        groups={groups}
+        onReview={() => setScreen('confirm')}
         onBack={() => router.push(kitchenBackUrl)}
-          kitchenName={resolvedWarehouse.replace(/ - FSRaC$/, '').replace(/ - .*$/, '')}
-        />
-        <div
-          style={{
-            position: 'fixed',
-            right: 10,
-            bottom: 10,
-            zIndex: 9999,
-            background: '#111827',
-            color: '#fff',
-            padding: '8px 10px',
-            borderRadius: 8,
-            fontSize: 11,
-            maxWidth: 260
-          }}
-        >
-          <div style={{ fontWeight: 800, marginBottom: 4 }}>Debug</div>
-          <div>warehouse: {resolvedWarehouse || '(none)'}</div>
-          <div>items: {itemsList.length}</div>
-          <div>stock rows: {stockList.length}</div>
-          <div>groups: {mappedGroups.length || groupOrder.length}</div>
-          <div style={{ marginTop: 4 }}>
-            sample: {debugSample?.code || '(none)'}
-          </div>
-          <div>item actual_qty: {String(debugSample?.itemQty ?? 'n/a')}</div>
-          <div>item valuation_rate: {String(debugSample?.itemRate ?? 'n/a')}</div>
-          <div>stock actual_qty: {String(debugSample?.stockQty ?? 'n/a')}</div>
-          <div>stock valuation_rate: {String(debugSample?.stockRate ?? 'n/a')}</div>
-          {error && <div style={{ color: '#f87171' }}>error: {error}</div>}
-        </div>
-      </>
+        kitchenName={resolvedWarehouse.replace(/ - FSRaC$/, '').replace(/ - .*$/, '')}
+      />
     );
   }
 
