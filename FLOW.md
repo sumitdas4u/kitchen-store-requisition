@@ -1,973 +1,347 @@
-# Food Studio — Kitchen Store Requisition System
-# Complete Technical Flow Documentation
-
-> Generated from codebase analysis · March 2026
-
----
-
-## Table of Contents
-
-1. [System Architecture Overview](#1-system-architecture-overview)
-2. [Authentication & Session Flow](#2-authentication--session-flow)
-3. [Requisition Lifecycle — Full State Machine](#3-requisition-lifecycle--full-state-machine)
-4. [Kitchen Flow — Step by Step](#4-kitchen-flow--step-by-step)
-5. [Store Flow — Step by Step](#5-store-flow--step-by-step)
-6. [Kitchen Acceptance & Finalize Flow](#6-kitchen-acceptance--finalize-flow)
-7. [Vendor Order & Purchase Receipt Flow](#7-vendor-order--purchase-receipt-flow)
-8. [Background Job Flows (BullMQ)](#8-background-job-flows-bullmq)
-9. [ERPNext Integration Flow](#9-erpnext-integration-flow)
-10. [Admin Operations Flow](#10-admin-operations-flow)
-11. [WhatsApp Notification Flow](#11-whatsapp-notification-flow)
-12. [Data Model Relationships](#12-data-model-relationships)
-13. [API Endpoint Map](#13-api-endpoint-map)
-14. [Critical Corrections vs README](#14-critical-corrections-vs-readme)
-
----
-
-## 1. System Architecture Overview
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  Browser / PWA                                                    │
-│  Next.js 14  ·  App Router  ·  Tailwind CSS                      │
-│                                                                   │
-│  /kitchen/*     /store/*     /admin/*                            │
-└───────────────────────┬──────────────────────────────────────────┘
-                        │  REST  +  JWT (8h)
-                        ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  NestJS Backend  (port 3001)                                      │
-│                                                                   │
-│  auth/  requisition/  store/  kitchen/  admin/                    │
-│  erp/   queue/        notifications/                              │
-└────────┬─────────────────────────────────┬────────────────────────┘
-         │                                 │
-         ▼                                 ▼
-┌─────────────────┐            ┌────────────────────────┐
-│  PostgreSQL 16  │            │  ERPNext (Frappe v15)  │
-│                 │            │  erp.food-studio.in     │
-│  users          │            │                         │
-│  requisitions   │            │  Item  (read)           │
-│  req_items      │            │  Bin   (read)           │
-│  user_warehouses│            │  Warehouse (read)       │
-│  vendor_orders  │            │  Stock Entry (write)    │
-│  vendor_receipts│            │  Purchase Order (write) │
-│  app_settings   │            │  Stock Reconciliation   │
-└─────────────────┘            └────────────────────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Redis 7        │
-│  BullMQ queues  │
-│                 │
-│  create-stock-entry         │
-│  create-stock-reconciliation│
-│  erp-write                  │
-│  send-whatsapp              │
-│  sync-items                 │
-└─────────────────┘
-```
-
----
-
-## 2. Authentication & Session Flow
-
-### Login
-
-```
-Browser                         NestJS /auth/login
-  │                                    │
-  ├──POST { username, password }──────►│
-  │                                    │  1. Look up user by username in Postgres
-  │                                    │  2. bcrypt.compare(password, password_hash)
-  │                                    │     [rounds = 12]
-  │                                    │  3. If no match → 401 Unauthorized
-  │                                    │  4. Sign JWT with payload:
-  │                                    │     { user_id, role, company,
-  │                                    │       full_name, default_warehouse,
-  │                                    │       source_warehouse }
-  │                                    │     expires: 8h
-  │◄── { access_token, user{...} } ───│
-  │                                    │
-  │  Store token in localStorage/      │
-  │  sessionStorage                    │
-```
-
-### Bootstrap (first-time setup only)
-
-```
-POST /auth/bootstrap
-  → Allowed ONLY when users table is empty
-  → Creates first Admin user
-  → Returns 403 on all subsequent calls
-```
-
-### JWT Guard on every protected route
-
-```
-Request → JwtStrategy.validate(payload)
-  → Attach { user_id, role, company, default_warehouse, source_warehouse }
-    to request as CurrentUser
-  → @Roles() decorator checks role enum
-```
-
-### Role Enum
-
-```
-Kitchen User  →  Role.Kitchen
-Store User    →  Role.Store
-Admin         →  Role.Admin
-```
-
----
-
-## 3. Requisition Lifecycle — Full State Machine
-
-```
-                    ┌──────────┐
-                    │  Draft   │◄─── Kitchen creates requisition
-                    └────┬─────┘
-                         │ PUT /requisition/:id/submit  (Kitchen)
-                         ▼
-                    ┌──────────┐
-                    │Submitted │◄─── Store sees it in pending list
-                    └────┬─────┘
-                    │         │
-       partial issue │         │ full issue
-                     ▼         ▼
-             ┌────────────┐  ┌────────┐
-             │ Partially  │  │ Issued │
-             │  Issued    │  └───┬────┘
-             └─────┬──────┘      │
-                   │             │  PUT /requisition/:id/confirm  (Kitchen)
-                   │             │  PUT /requisition/:id/finalize (Kitchen)
-                   │             ▼
-                   │        ┌───────────┐
-                   └───────►│ Completed │──► Stock Entry created in ERPNext (draft)
-                            └───────────┘         │
-                                                   ▼
-                                         Admin approves in ERPNext
-                                         → Stock moves in Bin
-
-             ┌───────────┐
-             │ Rejected  │◄─── Store/Admin rejects  OR  Kitchen cancels
-             └───────────┘     (status set to Rejected in both cases)
-
-             ┌───────────┐
-             │ Disputed  │   (status enum exists, not yet wired to an endpoint)
-             └───────────┘
-```
-
-### Item-level status (requisition_items.item_status)
-
-```
-Pending
-  ├─ issued_qty == requested_qty  →  Issued
-  ├─ issued_qty > 0               →  Partially Issued
-  └─ issued_qty == 0              →  Rejected
-```
-
-### Requisition status after issue()
-
-```
-All items issued fully  →  Issued
-Any item under-issued   →  Partially Issued
-```
-
-### Requisition status after confirm()
-
-```
-After kitchen confirms received_qty → status = Partially Issued
-(stays in "work in progress" loop; finalize() moves it to Completed)
-```
-
----
-
-## 4. Kitchen Flow — Step by Step
-
-### Step 1 — Create Requisition (Draft)
-
-```
-Kitchen User                          Backend                         ERPNext
-     │                                    │                              │
-     ├── Opens /kitchen/create-requisition│                              │
-     │                                    │                              │
-     │   (Page loads item list from       │                              │
-     │    kitchen.service → warehouse     │                              │
-     │    item groups filtered by         │                              │
-     │    user.default_warehouse)         │                              │
-     │                                    │                              │
-     │   For each item, user enters:      │                              │
-     │   • closing_stock   (ERP Bin qty)  │                              │
-     │   • actual_closing  (real count)   │                              │
-     │   • order_qty       (how much to   │                              │
-     │                      request)      │                              │
-     │                                    │                              │
-     ├── POST /requisition ──────────────►│                              │
-     │   { requested_date, shift,         │                              │
-     │     notes, items[{item_code,       │                              │
-     │     item_name, uom, closing_stock, │                              │
-     │     actual_closing, order_qty}] }  │                              │
-     │                                    │  buildItems():               │
-     │                                    │  • requested_qty = order_qty │
-     │                                    │  • issued_qty = 0            │
-     │                                    │  • received_qty = 0          │
-     │                                    │  • item_status = 'Pending'   │
-     │                                    │  • filter: qty>0 OR          │
-     │                                    │    actual_closing != null    │
-     │                                    │                              │
-     │                                    │  Save to Postgres:           │
-     │                                    │  requisitions (status=Draft) │
-     │                                    │  requisition_items           │
-     │◄── { id, status:'Draft', items }──│                              │
-```
-
-### Step 2 — Edit Draft (optional)
-
-```
-PUT /requisition/:id  (Kitchen only, Draft status required)
-  → Deletes existing items
-  → Saves new items
-  → Updates date/shift/notes
-```
-
-### Step 3 — Delete Draft (optional)
-
-```
-PUT /requisition/:id/delete  (Kitchen only, Draft status required)
-  → Deletes all items
-  → Deletes requisition record
-```
-
-### Step 4 — Submit Requisition
-
-```
-Kitchen User                          Backend                         ERPNext / Queue
-     │                                    │                              │
-     ├── PUT /requisition/:id/submit ────►│                              │
-     │                                    │  Validate: status == Draft   │
-     │                                    │  Set status = Submitted      │
-     │                                    │  Set submitted_at = NOW()    │
-     │                                    │  Save to Postgres            │
-     │                                    │                              │
-     │                                    │  Notify via WebSocket:       │
-     │                                    │  notifyStatusChange(id,      │
-     │                                    │  'Submitted')                │
-     │                                    │                              │
-     │                                    │  Check: any item where       │
-     │                                    │  actual_closing != closing_  │
-     │                                    │  stock?                      │
-     │                                    │    YES → enqueue             │
-     │                                    │    CreateStockReconciliation │
-     │                                    │    job (see §8)              │
-     │◄── { ok:true, status:'Submitted' }│                              │
-```
-
----
-
-## 5. Store Flow — Step by Step
-
-### Store sees pending requisitions
-
-```
-GET /requisition  (Store User)
-  → listForStore():
-    Filter: status IN (Submitted, Partially Issued)
-    Filter: req has items with requested_qty > 0
-    Filter: req has items where requested_qty > received_qty
-    Order: requested_date DESC
-```
-
-### Issue items (single requisition)
-
-```
-Store User                            Backend                         ERPNext
-     │                                    │                              │
-     │   Opens /store/issue/:id           │                              │
-     │   Sees item list with:             │                              │
-     │   • requested_qty (kitchen asked)  │                              │
-     │   • issued_qty (already issued)    │                              │
-     │   • bin stock (from ERP)           │                              │
-     │                                    │                              │
-     ├── PUT /requisition/:id/issue ─────►│                              │
-     │   { store_note, items: [{          │                              │
-     │     item_code, issued_qty }] }     │                              │
-     │                                    │  Validate:                   │
-     │                                    │  status IN (Submitted,       │
-     │                                    │  Partially Issued)           │
-     │                                    │                              │
-     │                                    │  For each item:              │
-     │                                    │  nextIssued = existing +     │
-     │                                    │               delta          │
-     │                                    │  nextIssued > requested_qty? │
-     │                                    │    → 400 BadRequest          │
-     │                                    │                              │
-     │                                    │  item_status:                │
-     │                                    │  • nextIssued == requested   │
-     │                                    │    → 'Issued'                │
-     │                                    │  • nextIssued > 0            │
-     │                                    │    → 'Partially Issued'      │
-     │                                    │  • nextIssued == 0           │
-     │                                    │    → 'Rejected'              │
-     │                                    │                              │
-     │                                    │  Requisition status:         │
-     │                                    │  allIssued? → Issued         │
-     │                                    │  else → Partially Issued     │
-     │                                    │                              │
-     │                                    │  Save requisition + items    │
-     │                                    │  Set issued_at = NOW()       │
-     │                                    │  Set store_note              │
-     │                                    │                              │
-     │                                    │  Notify WebSocket            │
-     │◄── { ok:true, status }────────────│                              │
-```
-
-### Get bin stock for store
-
-```
-GET /store/stock?warehouse=Main Store - FS
-  → erpService.getBinStock(warehouse)
-  → ERPNext: GET /api/resource/Bin
-    ?fields=["item_code","actual_qty","valuation_rate","warehouse"]
-    &filters=[["warehouse","=","Main Store - FS"]]
-  → Missing Bin row = qty 0 (not an error)
-```
-
-### Reject a requisition
-
-```
-PUT /requisition/:id/reject  (Store User or Admin)
-  Body: { reason? }
-  → Sets status = Rejected
-  → Sets notes = reason
-```
-
----
-
-## 6. Kitchen Acceptance & Finalize Flow
-
-### Confirm received items
-
-```
-Kitchen User                          Backend                         Queue / ERPNext
-     │                                    │                              │
-     │   After store issues items,        │                              │
-     │   kitchen opens /kitchen/receive/:id│                             │
-     │                                    │                              │
-     ├── PUT /requisition/:id/confirm ───►│                              │
-     │   { items: [{                      │                              │
-     │     item_code,                     │                              │
-     │     received_qty,                  │                              │
-     │     action: 'accept'|'reject'|null │                              │
-     │   }] }                             │                              │
-     │                                    │  Validate:                   │
-     │                                    │  status IN (Submitted,       │
-     │                                    │  Issued, Partially Issued)   │
-     │                                    │                              │
-     │                                    │  action == 'accept':         │
-     │                                    │   desired = issued_qty       │
-     │                                    │  action == 'reject':         │
-     │                                    │   desired = existing         │
-     │                                    │             received_qty     │
-     │                                    │  action == null:             │
-     │                                    │   desired = received_qty     │
-     │                                    │   (from body)                │
-     │                                    │                              │
-     │                                    │  nextReceived = max(existing,│
-     │                                    │                    desired)  │
-     │                                    │                              │
-     │                                    │  item_status recalc:         │
-     │                                    │  • received <= 0 → Rejected  │
-     │                                    │  • received < requested      │
-     │                                    │    → Partially Issued        │
-     │                                    │  • else → Issued             │
-     │                                    │                              │
-     │                                    │  Status → Partially Issued   │
-     │                                    │  completed_at = null         │
-     │◄── { ok:true, status }────────────│                              │
-```
-
-### Finalize (close the loop)
-
-```
-Kitchen User                          Backend                         Queue / ERPNext
-     │                                    │                              │
-     ├── PUT /requisition/:id/finalize ──►│                              │
-     │                                    │  Validate:                   │
-     │                                    │  status IN (Issued,          │
-     │                                    │  Partially Issued)           │
-     │                                    │                              │
-     │                                    │  Status → Completed          │
-     │                                    │  completed_at = NOW()        │
-     │                                    │  Save to Postgres            │
-     │                                    │                              │
-     │                                    │  hasReceived = any item      │
-     │                                    │  where received_qty > 0?     │
-     │                                    │                              │
-     │                                    │    YES → enqueue             │
-     │                                    │    CreateStockEntry job      │
-     │                                    │    (see §8)                  │
-     │◄── { ok:true, status:'Completed' }│                              │
-     │                                    │                              │
-     │                             [BullMQ processes async]             │
-     │                                    │                              │
-     │                                    │──────────────────────────────►│
-     │                                    │  POST /api/resource/         │
-     │                                    │  Stock Entry                 │
-     │                                    │  {                           │
-     │                                    │    docstatus: 0 (DRAFT)      │
-     │                                    │    stock_entry_type:         │
-     │                                    │      "Material Transfer"     │
-     │                                    │    from_warehouse: Main Store│
-     │                                    │    to_warehouse: Kitchen     │
-     │                                    │    remarks: "KR-{id} | ..."  │
-     │                                    │    items: [received items]   │
-     │                                    │    s_warehouse + t_warehouse │
-     │                                    │    on each item              │
-     │                                    │  }                           │
-     │                                    │◄── { name: "STE-00001" } ───│
-     │                                    │                              │
-     │                                    │  Save stock_entry = STE-xxx  │
-     │                                    │  on requisition record       │
-```
-
-### Cancel (kitchen side)
-
-```
-PUT /requisition/:id/cancel  (Kitchen User)
-  Body: { reason? }
-  Valid from: Submitted, Issued, Partially Issued
-  → Sets status = Rejected
-  → Sets notes = reason
-```
-
----
-
-## 7. Vendor Order & Purchase Receipt Flow
-
-### Shortage Analysis
-
-```
-Store User                            Backend                         ERPNext
-     │                                    │                              │
-     ├── GET /store/shortage?warehouse=──►│                              │
-     │                                    │  1. listForStore()           │
-     │                                    │     → pending requisitions   │
-     │                                    │                              │
-     │                                    │  2. Build itemMap:           │
-     │                                    │     needed_qty = Σ           │
-     │                                    │     (requested - issued)     │
-     │                                    │     across all pending reqs  │
-     │                                    │                              │
-     │                                    │  3. Parallel fetch:          │
-     │                                    │     • getBinStock(warehouse) │
-     │                                    │     • getItemSuppliers(codes)│
-     │                                    │     • getItemDefaults(codes) │
-     │                                    │     • vendorOverrides (DB)   │
-     │                                    │     • getItemStatuses(codes) │
-     │                                    │     • lastPurchasePriceMap   │
-     │                                    │       (from PO receipts)     │
-     │                                    │                              │
-     │                                    │  4. Vendor priority:         │
-     │                                    │     manual override          │
-     │                                    │     > erp_receipt override   │
-     │                                    │     > item default supplier  │
-     │                                    │     > first linked supplier  │
-     │                                    │                              │
-     │                                    │  5. shortfall =              │
-     │                                    │     max(0, needed - stock)   │
-     │                                    │                              │
-     │◄── [{ item_code, needed_qty,       │                              │
-     │       stock_qty, shortfall,        │                              │
-     │       price, vendor_id }]─────────│                              │
-```
-
-### Refresh Vendor Mapping from ERP Receipts
-
-```
-POST /store/vendor-mapping/refresh
-  → Scans last 12 months of Purchase Receipts from ERPNext
-  → Parallel fetch (max 5 concurrent) of receipt details
-  → Counts supplier frequency per item_code
-  → Picks most frequent supplier (tie-break: latest date → alpha name)
-  → Filters out disabled items
-  → Upserts vendor_item_overrides with source='erp_receipt'
-  → Returns { updated: N }
-```
-
-### Create Vendor Order (with auto PO creation)
-
-```
-Store User                            Backend                         ERPNext
-     │                                    │                              │
-     ├── POST /store/vendor-orders ──────►│                              │
-     │   { lines: [{ item_code,           │                              │
-     │     vendor_id, qty, price,         │                              │
-     │     is_manual }] }                 │                              │
-     │                                    │  1. Create vendor_order      │
-     │                                    │     record (status='draft')  │
-     │                                    │                              │
-     │                                    │  2. Save vendor_order_lines  │
-     │                                    │                              │
-     │                                    │  3. Group lines by vendor_id │
-     │                                    │                              │
-     │                                    │  4. For each vendor:         │
-     │                                    │────────────────────────────►  │
-     │                                    │  POST /api/resource/         │
-     │                                    │  Purchase Order              │
-     │                                    │  { supplier, company,        │
-     │                                    │    set_warehouse,            │
-     │                                    │    transaction_date,         │
-     │                                    │    schedule_date, items[] }  │
-     │                                    │◄── { name: "PO-xxxxx" } ────│
-     │                                    │                              │
-     │                                    │  PUT /api/resource/          │
-     │                                    │  Purchase Order/PO-xxxxx     │
-     │                                    │  { docstatus: 1 }  ← SUBMIT  │
-     │                                    │────────────────────────────►  │
-     │                                    │                              │
-     │                                    │  5. Save vendor_order_pos    │
-     │                                    │  6. Update vendor_order      │
-     │                                    │     status = 'po_created'    │
-     │◄── { vendor_order_id, POs[] } ────│                              │
-```
-
-### Create Purchase Receipt
-
-```
-Store User                            Backend                         ERPNext
-     │                                    │                              │
-     ├── POST /store/purchase-receipts ──►│                              │
-     │   { po_id, vendor_id,              │                              │
-     │     lines: [{item_code, qty}] }    │                              │
-     │                                    │  1. GET Purchase Order       │
-     │                                    │     from ERPNext             │
-     │                                    │                              │
-     │                                    │  2. POST Purchase Receipt    │
-     │                                    │     { supplier, purchase_    │
-     │                                    │       order, items[] }       │
-     │                                    │◄── { name: "GRNI-xxxxx" }───│
-     │                                    │                              │
-     │                                    │  3. PUT docstatus:1 (SUBMIT) │
-     │                                    │                              │
-     │                                    │  4. Save vendor_receipt +    │
-     │                                    │     vendor_receipt_lines     │
-     │                                    │     in local DB              │
-     │◄── { receipt_id } ────────────────│                              │
-```
-
-### WhatsApp share for vendor orders (client-side)
-
-```
-After PO created → frontend builds message:
-  "*Purchase Order — Food Studio*
-   PO No: *PO-20250316-142*
-   Vendor: *Poultry House*
-   Date: 16 Mar, 2025
-
-   Items:
-   • Chicken Breast: *6 Kg* @ ₹280 = *₹1,680*
-   ...
-   *Total: ₹2,340*"
-
-navigator.share(msg) OR window.open("https://wa.me/?text="+encodeURIComponent(msg))
-  ← client-side only, no server API call
-```
-
----
-
-## 8. Background Job Flows (BullMQ)
-
-### Queue Names (from constants.ts)
-
-```
-CreateStockEntry          → creates draft Stock Entry in ERPNext
-CreateStockReconciliation → creates + submits Stock Reconciliation in ERPNext
-ErpWrite                  → generic ERP write jobs
-SendWhatsapp              → WhatsApp Business API notifications
-SyncItems                 → item synchronization
-```
-
-### CreateStockEntry Job
-
-```
-Trigger: finalize() when any item has received_qty > 0
-
-Job data: { requisitionId: string }
-
-Process:
-  1. Load requisition + items from Postgres
-  2. Build ERPNext payload:
-     {
-       doctype: "Stock Entry",
-       stock_entry_type: "Material Transfer",
-       company: requisition.company,
-       docstatus: 0,                         ← ALWAYS DRAFT
-       from_warehouse: source_warehouse,
-       to_warehouse: warehouse (kitchen),
-       remarks: "KR-{id} | {kitchen} | {date}",
-       items: [
-         ...items.filter(received_qty > 0).map({
-           item_code, item_name, qty: received_qty,
-           uom, stock_uom, conversion_factor: 1,
-           s_warehouse: source_warehouse,     ← REQUIRED on item level
-           t_warehouse: kitchen_warehouse     ← REQUIRED on item level
-         })
-       ]
-     }
-  3. POST to ERPNext → get Stock Entry name (STE-xxxxx)
-  4. Save stock_entry = STE-xxxxx on requisition
-
-Retry strategy: 5 attempts, exponential backoff starting 2s
-```
-
-### CreateStockReconciliation Job
-
-```
-Trigger: submit() when any item has actual_closing != closing_stock
-
-Job data: { requisitionId: string }
-
-Process:
-  1. Load requisition + items from Postgres
-  2. Filter items where:
-     • actual_closing is not null
-     • actual_closing != closing_stock
-  3. Build payload:
-     {
-       doctype: "Stock Reconciliation",
-       company: requisition.company,
-       docstatus: 0,
-       purpose: "Stock Reconciliation",
-       items: [{ item_code, warehouse: kitchen, qty: actual_closing }]
-     }
-  4. POST to ERPNext → draft Stock Reconciliation
-  5. PUT docstatus:1 → SUBMIT immediately (unlike Stock Entry)
-     ^ This is auto-submitted, not left as draft
-
-Retry strategy: 5 attempts, exponential backoff starting 2s
-```
-
----
-
-## 9. ERPNext Integration Flow
-
-### Connection & Auth
-
-```
-Axios client (singleton per service start):
-  baseURL = ERP_BASE_URL (from .env or overridden by app_settings.erp_base_url)
-  Authorization = "token {ERP_API_KEY}:{ERP_API_SECRET}"
-  ← NOT "Bearer" — the keyword is literally "token"
-  timeout = 15000ms
-  axiosRetry: 3 retries, exponential delay, network/idempotent errors only
-```
-
-### Key ERPNext reads (ErpService methods)
-
-| Method | ERPNext endpoint | Notes |
-|--------|-----------------|-------|
-| `listCompanies()` | GET /api/resource/Company | |
-| `listWarehouses(company)` | GET /api/resource/Warehouse | filter by company |
-| `listItems(itemGroup?)` | GET /api/resource/Item | fetch all, filter disabled in JS |
-| `getBinStock(warehouse)` | GET /api/resource/Bin | missing row = qty 0 |
-| `listSuppliers()` | GET /api/resource/Supplier | |
-| `getItemSuppliers(codes)` | GET /api/resource/Item Supplier | |
-| `getItemDefaults(codes)` | GET /api/resource/Item Default | default_supplier field |
-| `searchItems(query)` | GET /api/resource/Item | name/item_name search |
-| `listPurchaseReceipts()` | GET /api/resource/Purchase Receipt | date range filter |
-| `getPurchaseOrder(id)` | GET /api/resource/Purchase Order/{id} | |
-
-### Key ERPNext writes
-
-| Method | ERPNext endpoint | docstatus |
-|--------|-----------------|-----------|
-| `createStockEntryDraft()` | POST /api/resource/Stock Entry | 0 (draft) |
-| `createPurchaseOrder()` | POST /api/resource/Purchase Order | 0 then PUT docstatus:1 |
-| `submitPurchaseOrder()` | PUT /api/resource/Purchase Order/:id | docstatus: 1 |
-| `createPurchaseReceipt()` | POST /api/resource/Purchase Receipt | 0 then submit |
-| `submitPurchaseReceipt()` | PUT /api/resource/Purchase Receipt/:id | docstatus: 1 |
-| `createStockReconciliationDraft()` | POST /api/resource/Stock Reconciliation | 0 then submit |
-| `submitStockReconciliation()` | PUT /api/resource/Stock Reconciliation/:id | docstatus: 1 |
-
-### Error handling patterns
-
-```
-isFilterFieldError()
-  Detects: "Field not permitted in query" / "Unknown column" / "Invalid field"
-  Used to fall back to fetching all records and filtering in JS
-  (e.g. disabled field cannot be used in ERPNext filters)
-
-isPermissionError()
-  Detects: 403 / "PermissionError"
-  Logged + empty array returned
-
-throwErpError()
-  Extracts detail from exception/message/error fields
-  Throws BadGatewayException with ERP error text
-```
-
-### ERPNext API Coding Standards
-
-#### Always paginate with a while loop
-
-ERPNext REST API returns at most `limit_page_length` records per request (default 20,
-max 500). A single request silently truncates results. **All list fetches must use a
-pagination loop.**
-
-```typescript
-// ✅ CORRECT — paginate until ERPNext returns fewer records than the page size
-const PAGE_SIZE = 500;
-const results: T[] = [];
-let start = 0;
-
-while (true) {
-  const { data } = await this.client.get('/api/resource/SomeDoctype', {
-    params: {
-      fields: JSON.stringify(['name', 'field_a', 'field_b']),
-      filters: JSON.stringify([/* your filters */]),
-      limit_start: start,
-      limit_page_length: PAGE_SIZE,
-    },
-  });
-
-  const page: T[] = data?.data ?? [];
-  results.push(...page);
-
-  if (page.length < PAGE_SIZE) break;   // last page reached
-  start += PAGE_SIZE;
-}
-
-return results;
-
-// ❌ WRONG — single request, silently loses records beyond the limit
-const { data } = await this.client.get('/api/resource/SomeDoctype', {
-  params: { fields: '["name"]' },
-});
-return data.data;
-```
-
----
-
-## 10. Admin Operations Flow
-
-### User Management
-
-```
-GET    /admin/users           → list all users with warehouses
-POST   /admin/users           → create user (bcrypt hash password, rounds 12)
-PUT    /admin/users/:id       → update user (role, warehouses, company, etc.)
-DELETE /admin/users/:id       → soft delete (is_active = false)
-```
-
-### Warehouse Item Group Mapping
-
-```
-GET /admin/item-groups?warehouse=   → warehouse_item_groups for warehouse
-POST /admin/item-groups             → assign item group to warehouse
-DELETE /admin/item-groups/:id       → remove mapping
-```
-
-### Stock Entry Management (ERPNext draft approvals)
-
-```
-GET  /admin/stock-entries           → list draft Stock Entries from ERPNext
-POST /admin/stock-entries/:name/approve
-  → PUT docstatus:1 on ERPNext
-  → Stock physically moves in Bin
-```
-
-### App Settings
-
-```
-GET /admin/settings             → erp_base_url, company list
-PUT /admin/settings             → update erp_base_url
-  → Overrides the client.defaults.baseURL in ErpService (ensureBaseUrl())
-```
-
-### Resolve disputed requisition
-
-```
-PUT /requisition/:id/resolve  (Admin only)
-  → Sets status = Completed
-  → Sets completed_at = NOW()
-  (skips the finalize/stock-entry creation step)
-```
-
----
-
-## 11. WhatsApp Notification Flow
-
-### Server-side (NestJS → Meta Cloud API)
-
-```
-POST https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages
-Headers: Authorization: Bearer {WHATSAPP_API_TOKEN}
-Body: {
-  messaging_product: "whatsapp",
-  to: "91{phone}",          ← 91 prefix added server-side
-  type: "text",
-  text: { body: message }
-}
-```
-
-### Client-side vendor orders
-
-```
-navigator.share({ title, text: message })
-  OR
-window.open("https://wa.me/?text=" + encodeURIComponent(message), "_blank")
-  ← Opens user's own WhatsApp (no server API)
-  ← Phone numbers stored without country code; wa.me link prepends 91
-```
-
-### Notification triggers
-
-| Event | Who | Channel |
-|-------|-----|---------|
-| Requisition submitted | Store team group | Server-side API |
-| Stock issued | Kitchen user | Server-side API |
-| Stock Entry approved | Store user | Server-side API |
-| Vendor order placed | Vendor (per vendor) | Client-side wa.me |
-
----
-
-## 12. Data Model Relationships
-
-```
-users (1) ──────────────── (*) user_warehouses
-  │                              warehouse VARCHAR
-  │
-  │ (1)
-  │
-  ▼ (*)
-requisitions
-  id, user_id, warehouse (kitchen),
-  source_warehouse (Main Store),
-  company, requested_date, shift,
-  status, store_note,
-  stock_entry (STE-xxxxx),
-  submitted_at, issued_at, completed_at
-  │
-  │ (1)
-  │
-  ▼ (*)
-requisition_items
-  item_code, item_name, uom,
-  closing_stock,      ← ERP Bin qty at time of creation
-  actual_closing,     ← Real physical count (kitchen entered)
-  required_qty,
-  requested_qty,      ← What kitchen asked for (order_qty)
-  issued_qty,         ← What store issued
-  received_qty,       ← What kitchen confirmed receiving
-  item_status
-
-warehouse_item_groups
-  warehouse, item_group, company
-  → Controls which items appear on kitchen requisition form
-
-vendor_orders (1) ─────── (*) vendor_order_lines
-  status: 'draft' | 'po_created'    item_code, vendor_id, qty, price
-  created_by (user_id)
-
-vendor_orders (1) ─────── (*) vendor_order_pos
-                               vendor_id, po_id, status
-
-vendor_receipts (1) ──── (*) vendor_receipt_lines
-  vendor_id, po_id, receipt_id    item_code, qty
-
-vendor_item_overrides
-  item_code, vendor_id, vendor_name,
-  source: 'manual' | 'erp_receipt'
-  → Priority: manual > erp_receipt > ERP item default > ERP supplier link
-
-app_settings
-  id=1 (always single row),
-  erp_base_url (overrides ERP_BASE_URL env var if set)
-```
-
----
-
-## 13. API Endpoint Map
-
-### Auth
-
-```
-POST /auth/login              Public
-POST /auth/bootstrap          Public (403 after first use)
-```
-
-### Requisition
-
-```
-POST   /requisition                Kitchen  → createDraft
-PUT    /requisition/:id            Kitchen  → updateDraft
-PUT    /requisition/:id/delete     Kitchen  → deleteDraft
-PUT    /requisition/:id/submit     Kitchen  → submit
-PUT    /requisition/:id/confirm    Kitchen  → confirm (received qty)
-PUT    /requisition/:id/finalize   Kitchen  → finalize → triggers Stock Entry
-PUT    /requisition/:id/cancel     Kitchen  → cancelByKitchen → Rejected
-PUT    /requisition/:id/issue      Store    → issue items
-PUT    /requisition/:id/reject     Store/Admin → reject
-PUT    /requisition/:id/resolve    Admin    → resolve → Completed
-GET    /requisition                All      → list (filtered by role)
-GET    /requisition/:id            All      → getOne
-```
-
-### Store
-
-```
-GET  /store/requisitions               Store  → pending reqs
-GET  /store/stock?warehouse=           Store  → ERPNext bin stock
-GET  /store/shortage?warehouse=        Store  → shortage analysis
-GET  /store/suppliers                  Store  → ERPNext suppliers
-GET  /store/vendor-overrides           Store  → vendor_item_overrides
-POST /store/vendor-overrides           Store  → save manual override
-POST /store/vendor-mapping/refresh     Store  → refresh from ERP receipts
-POST /store/vendor-orders              Store  → create order + POs in ERP
-GET  /store/vendor-orders/history      Store  → past orders
-GET  /store/purchase-orders/open       Store  → open POs from ERP
-POST /store/purchase-receipts          Store  → receive goods + submit in ERP
-```
-
-### Admin
-
-```
-GET    /admin/users                    Admin  → list users
-POST   /admin/users                    Admin  → create user
-PUT    /admin/users/:id                Admin  → update user
-DELETE /admin/users/:id                Admin  → soft delete
-GET    /admin/item-groups?warehouse=   Admin  → warehouse item groups
-POST   /admin/item-groups              Admin  → add item group
-DELETE /admin/item-groups/:id          Admin  → remove item group
-GET    /admin/stock-entries            Admin  → draft STE list
-POST   /admin/stock-entries/:name/approve  Admin → submit in ERP
-GET    /admin/settings                 Admin  → app settings
-PUT    /admin/settings                 Admin  → update settings
-```
-
----
-
-## 14. Critical Corrections vs README
-
-The following details differ between the README and the actual code:
-
-| README says | Code actually does |
-|-------------|-------------------|
-| Stock Entry created at Store Issue | Stock Entry created at `finalize()` (after kitchen confirms) |
-| Shift: 'Morning' \| 'Night' | Shift enum: `Morning` \| `Evening` |
-| Status: Draft→Submitted→Partially Issued→Issued→Completed | Same PLUS `Disputed` status exists in enum |
-| `confirm()` → Completed | `confirm()` → stays at Partially Issued; `finalize()` → Completed |
-| Schema shows no `actual_closing` field | `actual_closing` field exists on req_items; triggers Stock Reconciliation |
-| Schema shows no `store_note` field | `store_note` field exists on requisitions |
-| No `vendor_receipts` tables | vendor_receipt + vendor_receipt_lines tables in migration 0005 |
-| No `warehouse_items` table | warehouse_items table in migration 0002 |
-| Stock Reconciliation not mentioned | Created + auto-submitted when actual_closing differs from closing_stock |
-| Purchase Orders created as draft | POs created AND immediately submitted (docstatus:1) |
-| Purchase Receipts not documented | Full PR flow: create draft → submit → save locally |
-| `cancelByKitchen` not documented | Kitchen can cancel Submitted/Issued/Partially Issued → sets to Rejected |
-| No `resolve` endpoint | Admin can resolve any req → Completed (bypasses normal flow) |
-
----
-
-*End of Flow Documentation*
+# Kitchen -> Store -> ERPNext Flow
+
+Updated from the current codebase on 2026-03-23.
+
+This document focuses on the real end-to-end flow:
+- how kitchen asks store for stock
+- how store fulfills or partially fulfills it
+- how store creates vendor orders for remaining demand
+- where ERPNext documents are created, submitted, or cancelled
+- how local statuses change at each step
+
+## 1. Strict Requisition State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Draft
+    Draft --> Submitted: submit()
+    Draft --> Rejected: reject()
+
+    Submitted --> Partially_Issued: issue() partial
+    Submitted --> Issued: issue() full
+    Submitted --> Partially_Issued: confirm() partial or reject
+    Submitted --> Completed: confirm() full receive
+    Submitted --> Rejected: cancel() / reject()
+
+    Partially_Issued --> Partially_Issued: issue() more / confirm() partial
+    Partially_Issued --> Issued: issue() full request issued
+    Partially_Issued --> Completed: confirm() full receive / finalize() / resolve()
+    Partially_Issued --> Rejected: cancel() / reject()
+
+    Issued --> Partially_Issued: confirm() partial or reject
+    Issued --> Completed: confirm() full receive / finalize() / resolve()
+    Issued --> Rejected: cancel() / reject()
+
+    Disputed --> Completed: resolve()
+    Disputed --> Rejected: reject()
+
+    Completed --> Completed: finalize() idempotent
+    Rejected --> Rejected: reject() / cancel() idempotent
+```
+
+State machine rules:
+- `issue()` may only start from `Submitted` or `Partially Issued`.
+- `confirm()` may only start from `Submitted`, `Issued`, or `Partially Issued`.
+- `confirm()` auto-completes the requisition when every requested item has `received_qty >= requested_qty`.
+- `finalize()` remains the explicit close path for partial or rejected receipts and is idempotent for already completed records.
+- Status notifications fire only when the requisition status actually changes.
+
+## 2. Vendor Order Flow
+
+```mermaid
+flowchart TD
+    A[Store opens Order to Vendor] --> B[Load pending requisitions for store]
+    B --> C[Group by item_code]
+    C --> D[remaining demand = requested_qty - issued_qty]
+    D --> E[Attach request_sources by warehouse and requisition]
+    E --> F[Compare against main store stock]
+    F --> G[Return total_requested_qty, default_order_qty, shortfall_qty]
+
+    G --> H[Store adds items to vendor cart]
+    H --> I[Store can manually change final order qty]
+    I --> J[Create local vendor_order and vendor_order_lines]
+    J --> K[Save request source snapshots]
+
+    K --> L[Create ERPNext Purchase Order per vendor]
+    L --> M[Submit ERPNext Purchase Order]
+    M --> N[Save local vendor_order_po status = po_created]
+
+    L --> O{ERP creation fails?}
+    O -- Yes --> P[Save local vendor_order_po status = failed]
+    P --> Q[History shows failed PO]
+    Q --> R[Store clicks Retry PO]
+    R --> S[Backend rebuilds PO from saved local lines]
+    S --> L
+
+    N --> T[Store receives goods]
+    T --> U[Create ERPNext Purchase Receipt]
+    U --> V[Submit ERPNext Purchase Receipt]
+    V --> W[Save local vendor_receipt and lines]
+```
+
+## 3. Requisition Status Changes
+
+| Local requisition status | How it is reached | What it means |
+|---|---|---|
+| `Draft` | Kitchen creates requisition | Request is editable by kitchen |
+| `Submitted` | Kitchen submits draft | Store should review and issue |
+| `Partially Issued` | Store issues less than full request, or kitchen confirms receipt | Request is still in progress |
+| `Issued` | Store issues all requested qty | Store side is done issuing |
+| `Completed` | Kitchen fully confirms receipt, kitchen finalizes, or admin resolves | Request is closed locally |
+| `Rejected` | Store/admin rejects, or kitchen cancels | Request is closed without fulfillment |
+| `Disputed` | Enum exists only | Not currently wired to an endpoint |
+
+Important actual behavior:
+- `confirm()` moves the requisition to `Completed` when all requested quantities are received.
+- `confirm()` keeps the requisition in `Partially Issued` for partial and rejected receipts.
+- `finalize()` can still move partially received requisitions to `Completed`, and repeated calls are idempotent once already completed.
+
+## 4. Item-Level Status Changes
+
+| Item status | How it is reached |
+|---|---|
+| `Pending` | Item is created in draft |
+| `Issued` | `issued_qty === requested_qty` or full receipt confirmed |
+| `Partially Issued` | `0 < issued_qty < requested_qty` or partial receipt confirmed |
+| `Rejected` | Store leaves issued qty at `0`, or kitchen confirms zero receipt |
+
+## 5. Where ERPNext Documents Are Created
+
+| Business step | ERPNext document | Created when | Submitted when |
+|---|---|---|---|
+| Kitchen draft with requested items | Material Request | On `createDraft()` via queue | Not yet submitted |
+| Kitchen draft update | Material Request update | On `updateDraft()` | Not yet submitted |
+| Kitchen submit | Material Request | If needed, created immediately on submit or already exists | `submit_material_request` is queued |
+| Kitchen submit with actual closing mismatch | Stock Reconciliation | Queue processor creates draft | Submitted immediately in the same processor |
+| Store issues requisition | Stock Entry | Created immediately as draft in `issue()` | Submitted later on kitchen finalize |
+| Kitchen finalize with existing stock entry | Stock Entry | Already exists | `submit_stock_entry` is queued |
+| Kitchen finalize without existing stock entry | Stock Entry | `create-stock-entry` queue creates draft | Not auto-submitted in the same path |
+| Store creates direct transfer | Material Request | Created immediately in `createAndIssueFromStore()` | Submitted immediately in the same flow |
+| Store creates direct transfer | Stock Entry | Created immediately as draft | Submitted later when kitchen finalizes |
+| Store creates vendor order | Purchase Order | Created immediately per vendor | Submitted immediately after create |
+| Store receives vendor goods | Purchase Receipt | Created immediately | Submitted immediately after create |
+
+## 6. Exact Kitchen -> Store -> ERPNext Flow
+
+### Step 1. Kitchen creates a draft requisition
+
+Local effects:
+- `requisitions.status = Draft`
+- `requisition_items.requested_qty = order_qty`
+- `requisition_items.issued_qty = 0`
+- `requisition_items.received_qty = 0`
+- `requisition_items.item_status = Pending`
+
+ERPNext effects:
+- If the draft contains at least one item with `requested_qty > 0`, a Material Request draft is queued in ERPNext.
+- The local record is updated with `erp_name` once the queue succeeds.
+
+### Step 2. Kitchen submits the requisition
+
+Local effects:
+- `Draft -> Submitted`
+- `submitted_at` is set
+- store notification is emitted
+
+ERPNext effects:
+- Material Request is submitted in ERPNext.
+- If the Material Request draft does not exist yet, submit first creates it and then queues submit.
+- If any item has `actual_closing != closing_stock`, a Stock Reconciliation is created and immediately submitted in ERPNext.
+
+### Step 3. Store reviews and issues stock
+
+Local effects:
+- each item gets more `issued_qty`
+- requisition becomes:
+  - `Issued` if all items are fully issued
+  - `Partially Issued` if anything is under-issued
+- `issued_at` is set
+- optional `store_note` is saved
+
+ERPNext effects:
+- A Stock Entry draft is created immediately for the issued quantity.
+- If the Material Request and its child rows are available, Stock Entry rows are linked back to:
+  - `material_request`
+  - `material_request_item`
+
+### Step 4. Kitchen confirms what was actually received
+
+Local effects:
+- item `received_qty` is updated from accept / partial / reject action
+- requisition status becomes:
+  - `Completed` if all requested quantities are now fully received
+  - `Partially Issued` otherwise
+
+ERPNext effects:
+- If the requisition auto-completes and a Stock Entry draft already exists, `confirm()` queues ERP submission of that draft.
+- If the requisition auto-completes and no Stock Entry draft exists yet, `confirm()` queues the existing fallback Stock Entry draft-creation path.
+- Partial and rejected confirmations do not create a new ERP document in `confirm()`
+
+### Step 5. Kitchen finalizes
+
+Local effects:
+- requisition becomes `Completed`
+- `completed_at` is set
+
+ERPNext effects:
+- If a draft Stock Entry already exists, finalize queues ERP submission of that draft.
+- If no Stock Entry draft exists yet, finalize queues draft creation from `received_qty` or fallback `issued_qty`.
+- If the requisition is already `Completed`, `finalize()` is a no-op and does not duplicate ERP submission.
+
+Important nuance:
+- In the fallback path, the queue creates a Stock Entry draft and stores `stock_entry`, but that path does not auto-submit the new draft inside `finalize()`.
+
+## 7. Store-Initiated Transfer Flow
+
+This is the special path where store sends material to a kitchen without waiting for a kitchen-created requisition.
+
+API:
+- `POST /store/transfer/create`
+
+Local effects:
+- a requisition is created directly with status `Issued`
+- items are saved with:
+  - `requested_qty = qty`
+  - `issued_qty = qty`
+  - `received_qty = 0`
+  - `item_status = Issued`
+
+ERPNext effects:
+- Material Request is created and submitted immediately
+- Material Request item row names are fetched and stored locally
+- Stock Entry draft is created immediately and linked to the Material Request
+
+What happens later:
+- Kitchen can still confirm and finalize the transfer
+- Finalize submits the existing Stock Entry draft
+
+## 8. How Vendor Demand Is Calculated
+
+Vendor demand is not based on shortfall first. It is based on warehouse requests first.
+
+Source:
+- `GET /store/vendor-order/shortage`
+
+Calculation:
+- start from store-visible requisitions
+- per item, compute `remaining_qty = requested_qty - issued_qty`
+- group all warehouses by `item_code`
+- keep `request_sources[]` with:
+  - `requisition_id`
+  - `warehouse`
+  - `requested_date`
+  - `remaining_qty`
+- compare grouped request total against main store stock
+
+Returned fields:
+- `total_requested_qty`
+- `default_order_qty`
+- `stock_qty`
+- `shortfall_qty`
+- `request_sources[]`
+
+Important current behavior:
+- default vendor order qty is seeded from `total_requested_qty`
+- store user can manually change the final PO qty before ERP PO creation
+- `shortfall_qty` is still shown for reference
+
+## 9. Vendor Order Status Model
+
+There are two separate local status layers.
+
+### `vendor_orders.status`
+
+| Status | Meaning |
+|---|---|
+| `draft` | Local vendor order header just created |
+| `submitted` | ERP creation loop finished for all vendors |
+
+### `vendor_order_pos.status`
+
+| Status | Meaning |
+|---|---|
+| `po_created` | ERPNext Purchase Order was created and submitted |
+| `failed` | ERPNext PO creation failed for that vendor |
+
+Important current behavior:
+- success or failure is tracked per vendor in `vendor_order_pos`
+- history is ERP-first for successful records and DB-fallback for failed records
+- retry updates the same failed `vendor_order_pos` row to `po_created` if retry succeeds
+
+## 10. Retry PO Flow
+
+API:
+- `POST /store/vendor-order/retry/:id`
+
+What happens:
+1. Load the failed `vendor_order_pos` row.
+2. Reject retry if status is not `failed`.
+3. Load the original `vendor_order_lines` for that vendor.
+4. Recreate the ERPNext Purchase Order from saved local qty and rate.
+5. Submit the ERPNext Purchase Order.
+6. Update the same local `vendor_order_pos` row:
+   - `po_id = new ERP PO id`
+   - `status = po_created`
+   - `error_message = null`
+
+If retry fails again:
+- local status stays `failed`
+- `error_message` is replaced with the latest ERP error
+
+## 11. Purchase Receipt Flow
+
+API:
+- `GET /store/purchase-receipts/open-pos`
+- `POST /store/purchase-receipts/create`
+- `POST /store/purchase-receipts/:receiptId/upload`
+
+Flow:
+1. Store selects an ERP Purchase Order or creates a direct receipt.
+2. Backend creates a Purchase Receipt draft in ERPNext.
+3. Backend immediately submits the Purchase Receipt.
+4. Local `vendor_receipt` and `vendor_receipt_lines` are saved.
+5. Optional receipt photos are uploaded to ERPNext and attached to the Purchase Receipt.
+
+## 12. Endpoint Map For This Flow
+
+### Kitchen requisition lifecycle
+- `POST /requisition`
+- `PUT /requisition/:id`
+- `PUT /requisition/:id/delete`
+- `PUT /requisition/:id/submit`
+- `PUT /requisition/:id/confirm`
+- `PUT /requisition/:id/finalize`
+- `PUT /requisition/:id/cancel`
+
+### Store fulfillment lifecycle
+- `GET /store/requisitions`
+- `GET /store/requisitions/:id`
+- `POST /store/requisition/:id/issue`
+- `POST /store/transfer/create`
+- `GET /store/transfer/sent`
+
+### Store vendor ordering lifecycle
+- `GET /store/vendor-order/shortage`
+- `GET /store/vendor-order/items`
+- `POST /store/vendor-order/create`
+- `GET /store/vendor-order/history`
+- `POST /store/vendor-order/retry/:id`
+- `DELETE /store/vendor-order/po/:id`
+
+### Store purchase receipt lifecycle
+- `GET /store/purchase-receipts/open-pos`
+- `POST /store/purchase-receipts/create`
+- `POST /store/purchase-receipts/:receiptId/upload`
+
+## 13. Key Corrections To Remember
+
+- Material Request draft creation starts at kitchen draft creation, not only at submit time.
+- Vendor demand groups pending warehouse requests by item and uses `requested_qty - issued_qty`.
+- Store can order full requested quantity even if current stock makes shortfall smaller.
+- `confirm()` auto-completes when `received_qty` reaches `requested_qty` for every requested item.
+- `confirm()` keeps the requisition in `Partially Issued` for partial and rejected receipts.
+- `finalize()` remains the explicit close step for partial or rejected receipts.
+- Purchase Orders and Purchase Receipts are created as drafts and immediately submitted.
+- Stock Reconciliation is created and immediately submitted.
+- Stock Entry is created as draft first; submission happens later, usually on kitchen finalize.
+- Store-initiated transfer creates a requisition already in `Issued` status and immediately creates/submits the ERP Material Request.

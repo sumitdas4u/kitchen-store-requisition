@@ -14,6 +14,7 @@ import { ItemCatalogCache } from './entities/item-catalog-cache.entity'
 import { VendorItemOverride } from './entities/vendor-item-override.entity'
 import { VendorOrder } from './entities/vendor-order.entity'
 import { VendorOrderLine } from './entities/vendor-order-line.entity'
+import { VendorOrderLineSource } from './entities/vendor-order-line-source.entity'
 import { VendorOrderPo } from './entities/vendor-order-po.entity'
 import { VendorReceipt } from './entities/vendor-receipt.entity'
 import { VendorReceiptLine } from './entities/vendor-receipt-line.entity'
@@ -47,6 +48,7 @@ import { SyncLog } from './entities/sync-log.entity'
           VendorItemOverride,
           VendorOrder,
           VendorOrderLine,
+          VendorOrderLineSource,
           VendorOrderPo,
           VendorReceipt,
           VendorReceiptLine,

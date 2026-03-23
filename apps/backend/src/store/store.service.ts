@@ -8,10 +8,12 @@ import { ItemCatalogCache } from '../database/entities/item-catalog-cache.entity
 import { VendorItemOverride } from '../database/entities/vendor-item-override.entity'
 import { VendorOrder } from '../database/entities/vendor-order.entity'
 import { VendorOrderLine } from '../database/entities/vendor-order-line.entity'
+import { VendorOrderLineSource } from '../database/entities/vendor-order-line-source.entity'
 import { VendorOrderPo } from '../database/entities/vendor-order-po.entity'
 import { VendorReceipt } from '../database/entities/vendor-receipt.entity'
 import { VendorReceiptLine } from '../database/entities/vendor-receipt-line.entity'
 import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entity'
+import { ErpWarehouseCache } from '../database/entities/erp-warehouse-cache.entity'
 import { CreateVendorOrderDto } from './dto/create-vendor-order.dto'
 import { VendorOverrideDto } from './dto/vendor-override.dto'
 import { CreatePurchaseReceiptDto } from './dto/create-purchase-receipt.dto'
@@ -19,6 +21,12 @@ import { CreatePurchaseReceiptDto } from './dto/create-purchase-receipt.dto'
 // ── In-memory stock cache (5-min TTL per warehouse) ───────────────────────────
 interface StockEntry { qty: number; price: number }
 interface StockCacheEntry { data: Map<string, StockEntry>; ts: number }
+interface RequestSourceEntry {
+  requisition_id: number
+  warehouse: string
+  requested_date: string
+  remaining_qty: number
+}
 const STOCK_TTL_MS = 5 * 60 * 1000
 
 @Injectable()
@@ -40,6 +48,8 @@ export class StoreService implements OnModuleInit {
     private readonly vendorOrderRepo: Repository<VendorOrder>,
     @InjectRepository(VendorOrderLine)
     private readonly vendorOrderLineRepo: Repository<VendorOrderLine>,
+    @InjectRepository(VendorOrderLineSource)
+    private readonly vendorOrderLineSourceRepo: Repository<VendorOrderLineSource>,
     @InjectRepository(VendorOrderPo)
     private readonly vendorOrderPoRepo: Repository<VendorOrderPo>,
     @InjectRepository(VendorReceipt)
@@ -47,7 +57,9 @@ export class StoreService implements OnModuleInit {
     @InjectRepository(VendorReceiptLine)
     private readonly vendorReceiptLineRepo: Repository<VendorReceiptLine>,
     @InjectRepository(ErpBinStockCache)
-    private readonly binStockCacheRepo: Repository<ErpBinStockCache>
+    private readonly binStockCacheRepo: Repository<ErpBinStockCache>,
+    @InjectRepository(ErpWarehouseCache)
+    private readonly warehouseCacheRepo: Repository<ErpWarehouseCache>
   ) {}
 
   // ── Bootstrap ─────────────────────────────────────────────────────────────────
@@ -66,6 +78,47 @@ export class StoreService implements OnModuleInit {
     } catch (e) {
       this.logger.warn('onModuleInit check failed: ' + (e as Error).message)
     }
+  }
+
+  private async resolveCompanyFromWarehouses(
+    fallbackCompany: string | null | undefined,
+    ...warehouses: Array<string | null | undefined>
+  ) {
+    const uniqueWarehouses = Array.from(
+      new Set(
+        warehouses
+          .map((warehouse) => warehouse?.trim())
+          .filter((warehouse): warehouse is string => Boolean(warehouse))
+      )
+    )
+
+    if (uniqueWarehouses.length > 0) {
+      const warehouseRows = await this.warehouseCacheRepo.find({
+        where: { name: In(uniqueWarehouses) }
+      })
+      const companies = Array.from(
+        new Set(
+          warehouseRows
+            .map((row) => row.company?.trim())
+            .filter((company): company is string => Boolean(company))
+        )
+      )
+
+      if (companies.length > 1) {
+        throw new BadRequestException(
+          'Selected warehouses belong to different companies in ERP'
+        )
+      }
+      if (companies[0]) {
+        return companies[0]
+      }
+    }
+
+    if (fallbackCompany?.trim()) {
+      return fallbackCompany.trim()
+    }
+
+    throw new BadRequestException('Company is required')
   }
 
   // ── Stock cache helper ────────────────────────────────────────────────────────
@@ -278,14 +331,38 @@ export class StoreService implements OnModuleInit {
 
   async getShortageItems(warehouse: string) {
     const requisitions = await this.requisitionService.listForStore()
-    const itemMap = new Map<string, { item_code: string; item_name?: string | null; uom?: string | null; needed_qty: number }>()
+    const itemMap = new Map<string, {
+      item_code: string
+      item_name?: string | null
+      uom?: string | null
+      total_requested_qty: number
+      request_sources: RequestSourceEntry[]
+    }>()
     requisitions.forEach((req) => {
       req.items.forEach((item: any) => {
         const remaining = Math.max(0, Number(item.requested_qty) - Number(item.issued_qty || 0))
         if (remaining <= 0) return
+
+        const source: RequestSourceEntry = {
+          requisition_id: Number(req.id),
+          warehouse: String(req.warehouse || ''),
+          requested_date: String(req.requested_date || ''),
+          remaining_qty: remaining
+        }
+
         const existing = itemMap.get(item.item_code)
-        if (existing) { existing.needed_qty += remaining }
-        else { itemMap.set(item.item_code, { item_code: item.item_code, item_name: item.item_name, uom: item.uom, needed_qty: remaining }) }
+        if (existing) {
+          existing.total_requested_qty += remaining
+          existing.request_sources.push(source)
+        } else {
+          itemMap.set(item.item_code, {
+            item_code: item.item_code,
+            item_name: item.item_name,
+            uom: item.uom,
+            total_requested_qty: remaining,
+            request_sources: [source]
+          })
+        }
       })
     })
     const codes = Array.from(itemMap.keys())
@@ -313,21 +390,39 @@ export class StoreService implements OnModuleInit {
         : allVendors
 
       const stockQty = Number(stock?.qty || 0)
+      const totalRequestedQty = Number(req.total_requested_qty || 0)
+      const shortfallQty = Math.max(0, totalRequestedQty - stockQty)
+      const requestSources = [...req.request_sources].sort((a, b) => {
+        if (a.warehouse !== b.warehouse) {
+          return a.warehouse.localeCompare(b.warehouse)
+        }
+        if (a.requested_date !== b.requested_date) {
+          return a.requested_date.localeCompare(b.requested_date)
+        }
+        return a.requisition_id - b.requisition_id
+      })
 
       return {
         item_code: code,
         item_name: req.item_name || cat?.item_name || code,
         uom: req.uom || cat?.uom || '',
-        needed_qty: req.needed_qty,
+        needed_qty: totalRequestedQty,
+        total_requested_qty: totalRequestedQty,
+        default_order_qty: totalRequestedQty,
         stock_qty: stockQty,
-        shortfall: Math.max(0, req.needed_qty - stockQty),
+        shortfall: shortfallQty,
+        shortfall_qty: shortfallQty,
         price: Number(cat?.last_rate || 0),
         vendor_id: vendorId,
         vendor_name: vendorName,
         last_po_date: cat?.last_po_date || '',
-        all_vendors: sortedVendors
+        all_vendors: sortedVendors,
+        request_sources: requestSources
       }
-    })
+    }).sort((a, b) =>
+      b.total_requested_qty - a.total_requested_qty ||
+      a.item_name.localeCompare(b.item_name)
+    )
   }
 
   // ── Item search ───────────────────────────────────────────────────────────────
@@ -362,12 +457,16 @@ export class StoreService implements OnModuleInit {
           uom: cat.uom,
           stock_qty: Number(stock?.qty || 0),
           needed_qty: 0,
+          total_requested_qty: 0,
+          default_order_qty: 0,
           shortfall: 0,
+          shortfall_qty: 0,
           price: Number(cat.last_rate || 0),
           vendor_id: vendorId,
           vendor_name: manual?.vendor_name ?? cat.vendor_name ?? null,
           last_po_date: cat.last_po_date,
-          all_vendors: sortedVendors
+          all_vendors: sortedVendors,
+          request_sources: []
         }
       })
     }
@@ -397,9 +496,10 @@ export class StoreService implements OnModuleInit {
       const allVendors = (allSuppMap.get(item.name) ?? []).map((s) => ({ vendorId: s.vendorId, rate: s.rate, label: s.vendorId }))
       return {
         item_code: item.name, item_name: item.item_name, uom: item.stock_uom,
-        stock_qty: Number(stock?.qty || 0), needed_qty: 0, shortfall: 0,
+        stock_qty: Number(stock?.qty || 0), needed_qty: 0, total_requested_qty: 0,
+        default_order_qty: 0, shortfall: 0, shortfall_qty: 0,
         price: 0, vendor_id: vendorId, vendor_name: manual?.vendor_name ?? null,
-        last_po_date: '', all_vendors: allVendors
+        last_po_date: '', all_vendors: allVendors, request_sources: []
       }
     })
   }
@@ -433,7 +533,10 @@ export class StoreService implements OnModuleInit {
     dto: CreateVendorOrderDto
   ) {
     if (!dto?.lines || dto.lines.length === 0) throw new BadRequestException('At least one line is required')
-    if (!user.company) throw new BadRequestException('Company is required')
+    const company = await this.resolveCompanyFromWarehouses(
+      user.company,
+      user.source_warehouse
+    )
 
     const vendorOrder = this.vendorOrderRepo.create({ status: 'draft', created_by: user.user_id })
     const saved = await this.vendorOrderRepo.save(vendorOrder)
@@ -446,6 +549,21 @@ export class StoreService implements OnModuleInit {
       })
     )
     await this.vendorOrderLineRepo.save(lines)
+
+    const requestSourceRows = lines.flatMap((line, index) =>
+      (dto.lines[index]?.request_sources ?? []).map((source) =>
+        this.vendorOrderLineSourceRepo.create({
+          vendor_order_line_id: line.id,
+          requisition_id: Number(source.requisition_id),
+          warehouse: source.warehouse,
+          requested_date: source.requested_date,
+          remaining_qty: Number(source.remaining_qty || 0)
+        })
+      )
+    )
+    if (requestSourceRows.length > 0) {
+      await this.vendorOrderLineSourceRepo.save(requestSourceRows)
+    }
 
     const linesByVendor = new Map<string, VendorOrderLine[]>()
     lines.forEach((line) => {
@@ -468,7 +586,7 @@ export class StoreService implements OnModuleInit {
       const vendorName = vendorNameMap.get(vendorId) ?? null
       try {
         const poId = await this.erpService.createPurchaseOrder({
-          supplier: vendorId, company: user.company,
+          supplier: vendorId, company,
           set_warehouse: user.source_warehouse || undefined,
           transaction_date: new Date().toISOString().split('T')[0],
           schedule_date: new Date().toISOString().split('T')[0],
@@ -512,18 +630,21 @@ export class StoreService implements OnModuleInit {
       if (r.status === 'fulfilled' && r.value) erpMap.set(p.po_id, r.value)
     })
 
-    // For failed POs, fetch original lines from local DB
-    const failedPos = pos.filter((p) => p.status === 'failed')
-    const failedOrderIds = [...new Set(failedPos.map((p) => p.vendor_order_id))]
-    const dbLines = failedOrderIds.length > 0
-      ? await this.vendorOrderLineRepo.find({ where: { vendor_order_id: In(failedOrderIds) } })
+    const vendorOrderIds = [...new Set(pos.map((p) => p.vendor_order_id))]
+    const dbLines = vendorOrderIds.length > 0
+      ? await this.vendorOrderLineRepo.find({
+          where: { vendor_order_id: In(vendorOrderIds) },
+          relations: ['request_sources']
+        })
       : []
     const dbLinesByOrderVendor = new Map<string, VendorOrderLine[]>()
+    const dbLineByOrderVendorItem = new Map<string, VendorOrderLine>()
     dbLines.forEach((l) => {
-      const key = `${l.vendor_order_id}::${l.vendor_id}`
-      const list = dbLinesByOrderVendor.get(key) ?? []
+      const vendorKey = `${l.vendor_order_id}::${l.vendor_id}`
+      const list = dbLinesByOrderVendor.get(vendorKey) ?? []
       list.push(l)
-      dbLinesByOrderVendor.set(key, list)
+      dbLinesByOrderVendor.set(vendorKey, list)
+      dbLineByOrderVendorItem.set(`${vendorKey}::${l.item_code}`, l)
     })
 
     return pos.map((p) => {
@@ -535,19 +656,45 @@ export class StoreService implements OnModuleInit {
             qty:       Number(item.qty || 0),
             uom:       item.uom || item.stock_uom || '',
             rate:      Number(item.rate || 0),
+            requested_total_qty: Number(
+              (
+                dbLineByOrderVendorItem.get(
+                  `${p.vendor_order_id}::${p.vendor_id}::${item.item_code}`
+                )?.request_sources ?? []
+              ).reduce((sum, source) => sum + Number(source.remaining_qty || 0), 0)
+            ),
+            request_sources: (
+              dbLineByOrderVendorItem.get(
+                `${p.vendor_order_id}::${p.vendor_id}::${item.item_code}`
+              )?.request_sources ?? []
+            ).map((source) => ({
+              requisition_id: source.requisition_id,
+              warehouse: source.warehouse,
+              requested_date: source.requested_date,
+              remaining_qty: Number(source.remaining_qty || 0)
+            })),
           }))
         : []
 
-      // For failed POs, use original lines from DB
-      const dbItems = p.status === 'failed'
-        ? (dbLinesByOrderVendor.get(`${p.vendor_order_id}::${p.vendor_id}`) ?? []).map((l) => ({
-            item_code: l.item_code,
-            item_name: l.item_name || l.item_code,
-            qty:       Number(l.qty || 0),
-            uom:       l.uom || '',
-            rate:      Number(l.price || 0),
-          }))
-        : []
+      const dbItems = (dbLinesByOrderVendor.get(`${p.vendor_order_id}::${p.vendor_id}`) ?? []).map((l) => ({
+        item_code: l.item_code,
+        item_name: l.item_name || l.item_code,
+        qty:       Number(l.qty || 0),
+        uom:       l.uom || '',
+        rate:      Number(l.price || 0),
+        requested_total_qty: Number(
+          (l.request_sources ?? []).reduce(
+            (sum, source) => sum + Number(source.remaining_qty || 0),
+            0
+          )
+        ),
+        request_sources: (l.request_sources ?? []).map((source) => ({
+          requisition_id: source.requisition_id,
+          warehouse: source.warehouse,
+          requested_date: source.requested_date,
+          remaining_qty: Number(source.remaining_qty || 0)
+        })),
+      }))
 
       return {
         id:            p.id,
@@ -578,11 +725,15 @@ export class StoreService implements OnModuleInit {
       where: { vendor_order_id: poRecord.vendor_order_id, vendor_id: poRecord.vendor_id }
     })
     if (lines.length === 0) throw new BadRequestException('No order lines found for this PO')
+    const company = await this.resolveCompanyFromWarehouses(
+      user.company,
+      user.source_warehouse
+    )
 
     try {
       const poId = await this.erpService.createPurchaseOrder({
         supplier: poRecord.vendor_id,
-        company: user.company,
+        company,
         set_warehouse: user.source_warehouse || undefined,
         transaction_date: new Date().toISOString().split('T')[0],
         schedule_date: new Date().toISOString().split('T')[0],

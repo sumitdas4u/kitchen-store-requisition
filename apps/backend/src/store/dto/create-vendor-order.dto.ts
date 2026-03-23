@@ -2,11 +2,26 @@ import { Type } from 'class-transformer'
 import {
   IsArray,
   IsBoolean,
+  IsDateString,
   IsNumber,
   IsOptional,
   IsString,
   ValidateNested
 } from 'class-validator'
+
+export class VendorOrderRequestSourceDto {
+  @IsNumber()
+  requisition_id: number
+
+  @IsString()
+  warehouse: string
+
+  @IsDateString()
+  requested_date: string
+
+  @IsNumber()
+  remaining_qty: number
+}
 
 export class VendorOrderLineDto {
   @IsString()
@@ -32,6 +47,12 @@ export class VendorOrderLineDto {
   @IsOptional()
   @IsBoolean()
   is_manual?: boolean
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => VendorOrderRequestSourceDto)
+  request_sources?: VendorOrderRequestSourceDto[]
 }
 
 export class CreateVendorOrderDto {

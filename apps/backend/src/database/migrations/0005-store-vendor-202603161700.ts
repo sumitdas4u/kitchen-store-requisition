@@ -1,7 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm'
 
-export class StoreVendor2026031617001690 implements MigrationInterface {
-  name = 'StoreVendor2026031617001690'
+export class StoreVendor20260316170000 implements MigrationInterface {
+  name = 'StoreVendor20260316170000'
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
@@ -47,6 +47,7 @@ export class StoreVendor2026031617001690 implements MigrationInterface {
         vendor_name VARCHAR(200),
         po_id VARCHAR(200) NOT NULL,
         status VARCHAR(50) NOT NULL DEFAULT 'po_created',
+        error_message TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT now()
       );
     `)

@@ -10,10 +10,12 @@ import { ItemCatalogCache } from '../database/entities/item-catalog-cache.entity
 import { VendorItemOverride } from '../database/entities/vendor-item-override.entity'
 import { VendorOrder } from '../database/entities/vendor-order.entity'
 import { VendorOrderLine } from '../database/entities/vendor-order-line.entity'
+import { VendorOrderLineSource } from '../database/entities/vendor-order-line-source.entity'
 import { VendorOrderPo } from '../database/entities/vendor-order-po.entity'
 import { VendorReceipt } from '../database/entities/vendor-receipt.entity'
 import { VendorReceiptLine } from '../database/entities/vendor-receipt-line.entity'
 import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entity'
+import { ErpWarehouseCache } from '../database/entities/erp-warehouse-cache.entity'
 
 @Module({
   imports: [
@@ -26,10 +28,12 @@ import { ErpBinStockCache } from '../database/entities/erp-bin-stock-cache.entit
       VendorItemOverride,
       VendorOrder,
       VendorOrderLine,
+      VendorOrderLineSource,
       VendorOrderPo,
       VendorReceipt,
       VendorReceiptLine,
-      ErpBinStockCache
+      ErpBinStockCache,
+      ErpWarehouseCache
     ])
   ],
   controllers: [StoreController],

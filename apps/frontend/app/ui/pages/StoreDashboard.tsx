@@ -5,6 +5,21 @@ import { useRouter, usePathname } from 'next/navigation';
 import { apiRequest } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
 
+interface VendorRequestSource {
+  warehouse: string;
+  remainingQty: number;
+}
+
+interface VendorSummaryItem {
+  itemCode: string;
+  name: string;
+  unit: string;
+  totalRequestedQty: number;
+  stockQty: number;
+  shortfallQty: number;
+  requestSources: VendorRequestSource[];
+}
+
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&family=DM+Mono:wght@500;600&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -113,6 +128,30 @@ const fmt = (d: string) => { try { return new Date(d).toLocaleDateString('en-IN'
 const nowTime = () => new Date().toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12: true });
 const nowDate = () => new Date().toLocaleDateString('en-IN', { weekday:'short', day:'2-digit', month:'short' });
 
+const mapVendorSummaryItem = (item: any): VendorSummaryItem => ({
+  itemCode: String(item.item_code || ''),
+  name: String(item.item_name || item.item_code || ''),
+  unit: String(item.uom || ''),
+  totalRequestedQty: Number(item.total_requested_qty || item.needed_qty || 0),
+  stockQty: Number(item.stock_qty || 0),
+  shortfallQty: Number(item.shortfall_qty || item.shortfall || 0),
+  requestSources: (item.request_sources || []).map((source: any) => ({
+    warehouse: String(source.warehouse || ''),
+    remainingQty: Number(source.remaining_qty || 0),
+  })),
+});
+
+const summarizeSources = (sources: VendorRequestSource[]) => {
+  const grouped = new Map<string, number>();
+  sources.forEach(source => {
+    const key = source.warehouse || 'Unknown';
+    grouped.set(key, Number(grouped.get(key) || 0) + Number(source.remainingQty || 0));
+  });
+  return Array.from(grouped.entries())
+    .map(([warehouse, qty]) => ({ warehouse, qty }))
+    .sort((a, b) => a.warehouse.localeCompare(b.warehouse));
+};
+
 function BottomNav() {
   const pathname = usePathname();
   const router   = useRouter();
@@ -139,6 +178,7 @@ export function StoreDashboard() {
   const router         = useRouter();
   const token          = useAuthGuard('/store/login');
   const [reqs,   setReqs  ] = useState<any[]>([]);
+  const [vendorItems, setVendorItems] = useState<VendorSummaryItem[]>([]);
   const [time,   setTime  ] = useState(nowTime());
   const [loading,setLoading] = useState(true);
 
@@ -150,9 +190,20 @@ export function StoreDashboard() {
   const load = useCallback(() => {
     if (!token) return;
     setLoading(true);
-    apiRequest<any[]>('/store/requisitions', 'GET', undefined, token)
-      .then(d => { setReqs(d || []); setLoading(false); })
-      .catch(() => { setReqs([]); setLoading(false); });
+    Promise.all([
+      apiRequest<any[]>('/store/requisitions', 'GET', undefined, token),
+      apiRequest<any[]>('/store/vendor-order/shortage', 'GET', undefined, token),
+    ])
+      .then(([requisitions, shortage]) => {
+        setReqs(requisitions || []);
+        setVendorItems((shortage || []).map(mapVendorSummaryItem));
+        setLoading(false);
+      })
+      .catch(() => {
+        setReqs([]);
+        setVendorItems([]);
+        setLoading(false);
+      });
   }, [token]);
 
   useEffect(() => { load(); }, [load]);
@@ -162,6 +213,9 @@ export function StoreDashboard() {
   // Status values are Title Case: 'Submitted', 'Partially Issued', 'Issued', 'Completed'
   const pending    = reqs.filter(r => r.status === 'Submitted' || r.status === 'Partially Issued');
   const totalItems = reqs.reduce((s, r) => s + (r.items?.length ?? 0), 0);
+  const vendorWarehouseCount = new Set(
+    vendorItems.flatMap(item => summarizeSources(item.requestSources).map(source => source.warehouse))
+  ).size;
 
   return (
     <div className="spage">
@@ -217,6 +271,92 @@ export function StoreDashboard() {
             <span className="ac-sub">Push stock to kitchen</span>
             <span className="ac-badge orange">+ New</span>
           </div>
+        </div>
+
+        <div className="sec-title">Vendor Order Summary</div>
+        <div
+          className="fade"
+          style={{
+            background: 'var(--wh)',
+            borderRadius: 16,
+            padding: 14,
+            boxShadow: '0 1px 4px rgba(0,0,0,.07)',
+            border: '1.5px solid var(--ln)',
+            marginBottom: 12,
+          }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 900, color: 'var(--dk)' }}>
+                {vendorItems.length} aggregated items
+              </div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--lt)', marginTop: 2 }}>
+                {vendorWarehouseCount} warehouses contributing to vendor demand
+              </div>
+            </div>
+            <button
+              onClick={() => router.push('/store/vendor-orders')}
+              style={{
+                border: 'none',
+                borderRadius: 10,
+                background: 'var(--or)',
+                color: '#fff',
+                padding: '10px 12px',
+                fontSize: 12,
+                fontWeight: 900,
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}>
+              Create Order
+            </button>
+          </div>
+
+          {vendorItems.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {vendorItems.slice(0, 5).map(item => (
+                <div
+                  key={item.itemCode}
+                  style={{
+                    padding: 12,
+                    borderRadius: 12,
+                    background: '#F8FAFC',
+                    border: '1px solid var(--ln)',
+                  }}>
+                  <div style={{ fontSize: 13, fontWeight: 900, color: 'var(--dk)' }}>
+                    {item.name}
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                    <span className="ac-badge orange" style={{ marginTop: 0 }}>Req {item.totalRequestedQty} {item.unit}</span>
+                    <span className="ac-badge blue" style={{ marginTop: 0 }}>Stock {item.stockQty} {item.unit}</span>
+                    <span className="ac-badge red" style={{ marginTop: 0 }}>Short {item.shortfallQty} {item.unit}</span>
+                  </div>
+                  {item.requestSources.length > 0 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                      {summarizeSources(item.requestSources).map(source => (
+                        <span
+                          key={`${item.itemCode}-${source.warehouse}`}
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 800,
+                            padding: '3px 8px',
+                            borderRadius: 999,
+                            background: '#fff',
+                            color: '#475569',
+                            border: '1px solid var(--ln)',
+                          }}>
+                          {source.warehouse}: {source.qty} {item.unit}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ textAlign: 'center', padding: '18px 12px', color: 'var(--lt)' }}>
+              <div style={{ fontSize: 14, fontWeight: 800 }}>No vendor-order items waiting</div>
+              <div style={{ fontSize: 12, fontWeight: 700, marginTop: 4 }}>Warehouse request totals will appear here</div>
+            </div>
+          )}
         </div>
 
         {/* Pending Transfers */}

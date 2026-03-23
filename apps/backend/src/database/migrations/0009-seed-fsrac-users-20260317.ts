@@ -4,6 +4,7 @@ import * as bcrypt from 'bcrypt'
 const SOURCE_WAREHOUSE = 'Stores - FSRaC'
 const ROLE = 'Kitchen User'
 const DEFAULT_PASSWORD = 'Welcome@1234'
+const TARGET_COMPANY = 'Food Studio Restaurant and Cafe'
 
 const USERS = [
   { username: 'anybelly', full_name: 'AnyBelly', warehouse: 'AnyBelly - FSRaC', email: 'anybelly@foodstudio.local' },
@@ -419,11 +420,7 @@ export class SeedFsracUsers20260317220000 implements MigrationInterface {
   name = 'SeedFsracUsers20260317220000'
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // Resolve company from app_settings (falls back to 'Food Studio' if not yet configured)
-    const [settings] = await queryRunner.query(
-      `SELECT company FROM app_settings ORDER BY id LIMIT 1`,
-    )
-    const company: string = settings?.company ?? 'Food Studio'
+    const company = TARGET_COMPANY
 
     const passwordHash = await bcrypt.hash(DEFAULT_PASSWORD, 10)
 

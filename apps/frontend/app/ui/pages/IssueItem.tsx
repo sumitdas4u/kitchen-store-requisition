@@ -120,6 +120,8 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 .success-sub{font-size:13px;font-weight:700;color:var(--md);text-align:center;margin-bottom:20px;line-height:1.5}
 .success-done-btn{display:block;margin:0 18px;padding:14px;background:var(--gn);color:#fff;border:none;
   border-radius:13px;font-family:'Nunito',sans-serif;font-size:14px;font-weight:900;cursor:pointer;width:calc(100% - 36px)}
+.success-share-btn{display:block;margin:10px 18px 0;padding:13px;background:#25D366;color:#fff;border:none;
+  border-radius:13px;font-family:'Nunito',sans-serif;font-size:13px;font-weight:900;cursor:pointer;width:calc(100% - 36px)}
 .success-more-btn{display:block;margin:10px 18px 0;padding:13px;background:var(--bg);color:var(--dk);
   border:2px solid var(--ln);border-radius:13px;font-family:'Nunito',sans-serif;font-size:13px;
   font-weight:800;cursor:pointer;width:calc(100% - 36px)}
@@ -133,6 +135,14 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 const COLORS = ['#16A34A','#F97316','#EF4444','#0EA5E9','#8B5CF6','#1D4ED8'];
 const getColor = (s: string) => COLORS[Math.abs((s || '').split('').reduce((a,c) => a + c.charCodeAt(0), 0)) % COLORS.length];
 const n3 = (v: number) => parseFloat(Number(v).toFixed(3));
+const shareOnWhatsApp = (title: string, text: string) => {
+  const payload = `${title}\n${text}`.trim();
+  if (navigator.share) {
+    navigator.share({ title, text: payload }).catch(() => {});
+    return;
+  }
+  window.open(`https://wa.me/?text=${encodeURIComponent(payload)}`, '_blank');
+};
 
 export function IssueItem() {
   const router = useRouter();
@@ -201,6 +211,37 @@ export function IssueItem() {
     }
   };
 
+  const shareIssuedItems = () => {
+    if (!requisition || !id) return;
+
+    const issuedLines = (requisition.items || [])
+      .map((item: any) => {
+        const qty = Number(issued[item.item_code] ?? 0);
+        if (qty <= 0) return null;
+        const label = item.item_name || item.item_code;
+        const unit = item.uom ? ` ${item.uom}` : '';
+        return `- ${label}: ${qty}${unit}`;
+      })
+      .filter((line: string | null): line is string => Boolean(line));
+
+    if (issuedLines.length === 0) return;
+
+    const lines = [
+      `Store issue for TR-${id}`,
+      `Kitchen: ${requisition.warehouse || 'Unknown'}`,
+      '',
+      'Items issued:',
+      ...issuedLines
+    ];
+
+    const note = storeNote.trim();
+    if (note) {
+      lines.push('', `Note: ${note}`);
+    }
+
+    shareOnWhatsApp(`TR-${id} issued`, lines.join('\n'));
+  };
+
   if (!token) return null;
 
   const wh    = requisition?.warehouse || 'Loading...';
@@ -223,6 +264,9 @@ export function IssueItem() {
             </div>
             <button className="success-done-btn" onClick={() => router.push('/store/transfers')}>
               Done → Back to Transfers
+            </button>
+            <button className="success-share-btn" onClick={shareIssuedItems}>
+              Share on WhatsApp
             </button>
             <button className="success-more-btn" onClick={() => router.push('/store')}>
               Go to Dashboard

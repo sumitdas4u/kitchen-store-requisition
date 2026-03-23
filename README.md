@@ -24,7 +24,7 @@ Kitchen staff create requisitions, store managers issue items and place purchase
 
 - Node.js 20+
 - Docker & Docker Compose
-- An ERPNext instance (for ERP integration)
+- An ERPNext instance if you want live ERP sync from your local environment
 
 ### 1. Clone & install
 
@@ -36,31 +36,45 @@ npm install
 
 ### 2. Configure environment
 
-Copy `.env.example` or create `.env` at the project root:
+Copy `.env.example` to `.env` at the project root.
+
+The checked-in example is safe for local development:
+- `JWT_SECRET` already has a local-only default.
+- ERP and WhatsApp values are optional.
+- Docker host ports default to `5433` for Postgres and `6380` for Redis to avoid conflicts with existing local services.
 
 ```env
-# ERP Integration
-ERP_BASE_URL=https://your-erp.example.com
-ERP_API_KEY=your_api_key
-ERP_API_SECRET=your_api_secret
+# App DB
+DATABASE_URL=postgresql://kitchen:kitchen_pass@localhost:5433/kitchen_app
+
+# Host ports exposed by Docker Compose
+POSTGRES_HOST_PORT=5433
+REDIS_HOST_PORT=6380
+FRONTEND_PORT=3000
+BACKEND_PORT=3001
+
+# ERPNext (optional for local development)
+ERP_BASE_URL=
+ERP_API_KEY=
+ERP_API_SECRET=
 
 # JWT
-JWT_SECRET=your_jwt_secret
+JWT_SECRET=local-dev-jwt-secret
 JWT_EXPIRES_IN=24h
-
-# Database
-DATABASE_URL=postgresql://kitchen:kitchen_pass@localhost:5432/kitchen_app
 
 # Redis
 REDIS_HOST=localhost
-REDIS_PORT=6379
+REDIS_PORT=6380
 
-# WhatsApp Notifications (optional)
+# WhatsApp (optional)
 WHATSAPP_API_URL=
 WHATSAPP_API_TOKEN=
 WHATSAPP_PHONE_NUMBER_ID=
 WHATSAPP_ADMIN_NUMBERS=
 WHATSAPP_STORE_NUMBERS=
+
+# Frontend
+NEXT_PUBLIC_API_BASE_URL=http://localhost:3001
 
 # App
 NODE_ENV=development
@@ -69,10 +83,10 @@ PORT=3001
 
 ### 3. Start development
 
-**Option A** — Run everything natively (recommended for Windows):
+**Option A** - Run everything natively:
 
 ```bash
-# Terminal 1: Start Postgres + Redis
+# Terminal 1: Start Postgres + Redis in Docker
 npm run dev:infra
 
 # Terminal 2: Start backend (port 3001)
@@ -88,11 +102,19 @@ Or all at once:
 npm run dev
 ```
 
-**Option B** — Run everything in Docker:
+**Option B** - Run everything in Docker (recommended for team setup and moving between machines):
 
 ```bash
 npm run dev:docker
 ```
+
+App URLs:
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:3001`
+- Postgres from host: `localhost:5433`
+- Redis from host: `localhost:6380`
+
+For a full multi-developer workflow, see [TEAM_SETUP.md](./TEAM_SETUP.md).
 
 ### 4. Bootstrap admin account
 
@@ -101,7 +123,7 @@ On first run, create your admin account:
 ```bash
 curl -X POST http://localhost:3001/auth/bootstrap \
   -H "Content-Type: application/json" \
-  -d '{"username": "admin", "password": "your_password", "full_name": "Admin"}'
+  -d '{"username":"admin","full_name":"Admin","email":"admin@example.com","password":"your_password","company":"Food Studio"}'
 ```
 
 ### 5. Sync ERP data
@@ -299,3 +321,4 @@ Additional items for any warehouse can be added at **Admin > Item Groups** or **
 ## License
 
 Private / proprietary.
+

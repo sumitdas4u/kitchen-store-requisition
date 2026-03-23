@@ -3,9 +3,11 @@ import {
   Entity,
   JoinColumn,
   ManyToOne,
+  OneToMany,
   PrimaryGeneratedColumn
 } from 'typeorm'
 import { VendorOrder } from './vendor-order.entity'
+import { VendorOrderLineSource } from './vendor-order-line-source.entity'
 
 @Entity({ name: 'vendor_order_lines' })
 export class VendorOrderLine {
@@ -41,4 +43,9 @@ export class VendorOrderLine {
 
   @Column({ type: 'boolean', default: false })
   is_manual: boolean
+
+  @OneToMany(() => VendorOrderLineSource, (source) => source.vendor_order_line, {
+    cascade: true
+  })
+  request_sources: VendorOrderLineSource[]
 }

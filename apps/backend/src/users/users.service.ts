@@ -1,9 +1,10 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
-import { QueryFailedError, Repository } from 'typeorm'
+import { In, QueryFailedError, Repository } from 'typeorm'
 import * as bcrypt from 'bcrypt'
 import { User } from '../database/entities/user.entity'
 import { UserWarehouse } from '../database/entities/user-warehouse.entity'
+import { ErpWarehouseCache } from '../database/entities/erp-warehouse-cache.entity'
 import { CreateUserDto } from './dto/create-user.dto'
 import { UpdateUserDto } from './dto/update-user.dto'
 import { Role } from '../common/enums'
@@ -14,7 +15,9 @@ export class UsersService {
     @InjectRepository(User)
     private readonly usersRepo: Repository<User>,
     @InjectRepository(UserWarehouse)
-    private readonly warehousesRepo: Repository<UserWarehouse>
+    private readonly warehousesRepo: Repository<UserWarehouse>,
+    @InjectRepository(ErpWarehouseCache)
+    private readonly erpWarehouseCacheRepo: Repository<ErpWarehouseCache>
   ) {}
 
   async findActiveByUsername(username: string) {
@@ -33,6 +36,24 @@ export class UsersService {
 
   async countUsers() {
     return this.usersRepo.count()
+  }
+
+  async countAdmins() {
+    return this.usersRepo.count({
+      where: { role: Role.Admin }
+    })
+  }
+
+  async resolveEffectiveCompany(user: {
+    company?: string | null
+    default_warehouse?: string | null
+    source_warehouse?: string | null
+  }) {
+    return this.resolveCompanyFromWarehouses(
+      user.company,
+      user.source_warehouse,
+      user.default_warehouse
+    )
   }
 
   async getUser(id: number) {
@@ -167,5 +188,46 @@ export class UsersService {
   private async replaceWarehouses(userId: number, warehouses: string[]) {
     await this.warehousesRepo.delete({ user_id: userId })
     await this.saveWarehouses(userId, warehouses)
+  }
+
+  private async resolveCompanyFromWarehouses(
+    fallbackCompany: string | null | undefined,
+    ...warehouses: Array<string | null | undefined>
+  ) {
+    const uniqueWarehouses = Array.from(
+      new Set(
+        warehouses
+          .map((warehouse) => warehouse?.trim())
+          .filter((warehouse): warehouse is string => Boolean(warehouse))
+      )
+    )
+
+    if (uniqueWarehouses.length > 0) {
+      const warehouseRows = await this.erpWarehouseCacheRepo.find({
+        where: { name: In(uniqueWarehouses) }
+      })
+      const companies = Array.from(
+        new Set(
+          warehouseRows
+            .map((row) => row.company?.trim())
+            .filter((company): company is string => Boolean(company))
+        )
+      )
+
+      if (companies.length > 1) {
+        throw new BadRequestException(
+          'Assigned warehouses belong to different companies in ERP'
+        )
+      }
+      if (companies[0]) {
+        return companies[0]
+      }
+    }
+
+    if (fallbackCompany?.trim()) {
+      return fallbackCompany.trim()
+    }
+
+    throw new BadRequestException('Company is required')
   }
 }

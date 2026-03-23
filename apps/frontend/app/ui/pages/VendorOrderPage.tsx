@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { apiRequest } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
 
@@ -14,17 +14,28 @@ interface Vendor {
   color:       string;
 }
 
+interface RequestSource {
+  requisitionId: number;
+  warehouse: string;
+  requestedDate: string;
+  remainingQty: number;
+}
+
 interface CatalogItem {
   itemCode:     string;
   name:         string;
   unit:         string;
   stockQty:     number;
   neededQty:    number;
+  totalRequestedQty: number;
+  defaultOrderQty: number;
   shortfall:    number;
+  shortfallQty: number;
   autoVendorId: string;
   lastRate:     number;
   lastPoDate:   string;
   allVendors:   { vendorId: string; rate: number; label: string }[];
+  requestSources: RequestSource[];
 }
 
 interface CartLine {
@@ -37,6 +48,8 @@ interface CartLine {
   isManual:     boolean;
   autoVendorId: string;
   allVendors:   { vendorId: string; rate: number; label: string }[];
+  requestSources: RequestSource[];
+  requestedTotalQty: number;
 }
 
 interface PastOrder {
@@ -64,6 +77,15 @@ const inr = (n: number) => `₹${Number(n).toLocaleString('en-IN', { maximumFrac
 const fmt = (d: string) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 const fmtShort = (d: string) => { const [,m,day] = d.split('-'); return `${day}/${m}`; };
 
+function mapRequestSource(source: any): RequestSource {
+  return {
+    requisitionId: Number(source?.requisition_id || 0),
+    warehouse: String(source?.warehouse || ''),
+    requestedDate: String(source?.requested_date || ''),
+    remainingQty: Number(source?.remaining_qty || 0),
+  };
+}
+
 function mapApiItem(item: any): CatalogItem {
   return {
     itemCode:     item.item_code,
@@ -71,7 +93,10 @@ function mapApiItem(item: any): CatalogItem {
     unit:         item.uom || '',
     stockQty:     Number(item.stock_qty  || 0),
     neededQty:    Number(item.needed_qty || 0),
+    totalRequestedQty: Number(item.total_requested_qty || item.needed_qty || 0),
+    defaultOrderQty: Number(item.default_order_qty || item.total_requested_qty || item.needed_qty || 0),
     shortfall:    Number(item.shortfall  || 0),
+    shortfallQty: Number(item.shortfall_qty || item.shortfall || 0),
     autoVendorId: item.vendor_id || '',
     lastRate:     Number(item.price      || 0),
     lastPoDate:   item.last_po_date || '',
@@ -80,7 +105,19 @@ function mapApiItem(item: any): CatalogItem {
       rate:     Number(v.rate || 0),
       label:    v.label,
     })),
+    requestSources: (item.request_sources || []).map((source: any) => mapRequestSource(source)),
   };
+}
+
+function summarizeSources(sources: RequestSource[]) {
+  const grouped = new Map<string, number>();
+  sources.forEach(source => {
+    const key = source.warehouse || 'Unknown';
+    grouped.set(key, Number(grouped.get(key) || 0) + Number(source.remainingQty || 0));
+  });
+  return Array.from(grouped.entries())
+    .map(([warehouse, qty]) => ({ warehouse, qty: n3(qty) }))
+    .sort((a, b) => a.warehouse.localeCompare(b.warehouse));
 }
 
 function fallbackVendor(id: string, idx = 0): Vendor {
@@ -89,6 +126,32 @@ function fallbackVendor(id: string, idx = 0): Vendor {
 
 function getV(vendorMap: Map<string, Vendor>, id: string): Vendor {
   return vendorMap.get(id) ?? fallbackVendor(id);
+}
+
+function BottomNav() {
+  const pathname = usePathname();
+  const router = useRouter();
+  const items = [
+    { icon: '🏠', label: 'Home', path: '/store' },
+    { icon: '📦', label: 'Transfers', path: '/store/transfers' },
+    { icon: '🛒', label: 'Orders', path: '/store/vendor-orders' },
+    { icon: '📋', label: 'Receipts', path: '/store/purchase-receipts' },
+  ];
+
+  return (
+    <nav className="bnav">
+      {items.map((item) => (
+        <button
+          key={item.path}
+          className={`bnav-item ${pathname === item.path ? 'active' : ''}`}
+          onClick={() => router.push(item.path)}
+        >
+          <span className="bnav-icon">{item.icon}</span>
+          <span className="bnav-label">{item.label}</span>
+        </button>
+      ))}
+    </nav>
+  );
 }
 
 function buildWaMessage(vendor: Vendor, lines: CartLine[], poId?: string): string {
@@ -122,9 +185,11 @@ function mapHistoryToOrders(history: any[]): PastOrder[] {
       qty:          Number(item.qty  || 0),
       rate:         Number(item.rate || 0),
       vendorId:     record.vendor_id || '',
-      isManual:     false,
+      isManual:     !(item.request_sources || []).length,
       autoVendorId: record.vendor_id || '',
       allVendors:   [],
+      requestSources: (item.request_sources || []).map((source: any) => mapRequestSource(source)),
+      requestedTotalQty: Number(item.requested_total_qty || 0),
     })),
     status:       record.status === 'po_created' ? 'po_created' : record.status === 'failed' ? 'failed' : 'draft',
     createdAt:    record.created_at,
@@ -149,7 +214,7 @@ const CSS = `
 }
 body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent}
 
-.vpage{max-width:480px;margin:0 auto;min-height:100vh;background:var(--bg)}
+.vpage{max-width:480px;margin:0 auto;min-height:100vh;background:var(--bg);padding-bottom:72px}
 
 .vhdr{background:var(--dk);position:sticky;top:0;z-index:60}
 .vhdr-top{padding:14px 16px 10px;display:flex;align-items:center;justify-content:space-between;gap:10px}
@@ -181,7 +246,7 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 .vtabcnt.muted{background:var(--ln);color:var(--md)}
 .vtabcnt.gn{background:var(--gn)}
 
-.vbody{padding:12px 12px 90px}
+.vbody{padding:12px 12px 164px}
 .vsection-title{font-size:10px;font-weight:800;color:var(--lt);text-transform:uppercase;
   letter-spacing:.07em;padding:10px 2px 7px}
 
@@ -354,7 +419,7 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 .osr-row:last-child{border-bottom:none}
 .osr-row:active{background:var(--orl)}
 
-.bbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);
+.bbar{position:fixed;bottom:72px;left:50%;transform:translateX(-50%);
   width:100%;max-width:480px;background:var(--wh);
   border-top:2px solid var(--ln);box-shadow:0 -4px 24px rgba(0,0,0,.1)}
 .bbar-inner{padding:10px 12px 16px;display:flex;gap:9px}
@@ -365,6 +430,16 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
   border-radius:13px;cursor:pointer;font-family:'Nunito',sans-serif;font-size:14px;font-weight:900}
 .bbar-primary:disabled{background:#D1D5DB;cursor:not-allowed}
 .bbar-primary:not(:disabled):active{background:#EA6C04}
+
+.bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);
+  width:100%;max-width:480px;background:var(--wh);border-top:2px solid var(--ln);
+  display:flex;z-index:60}
+.bnav-item{flex:1;display:flex;flex-direction:column;align-items:center;padding:9px 4px 12px;
+  cursor:pointer;border:none;background:none;-webkit-tap-highlight-color:transparent}
+.bnav-icon{font-size:20px;line-height:1}
+.bnav-label{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;
+  margin-top:3px;color:var(--lt)}
+.bnav-item.active .bnav-label{color:var(--or)}
 
 .review-header{background:var(--dk);border-radius:14px;padding:16px;
   display:flex;align-items:center;gap:13px;margin-bottom:12px}
@@ -460,7 +535,7 @@ function ShortageTab({ items, cart, vendorMap, onAdd, onRemove, onChangeVendor, 
   loading:        boolean;
   error:          string | null;
 }) {
-  const shortages = useMemo(() => items.filter(i => i.shortfall > 0), [items]);
+  const shortages = useMemo(() => items.filter(i => i.totalRequestedQty > 0), [items]);
 
   // Per-item state: selected vendor + price
   const [rowStates, setRowStates] = useState<Record<string, ItemRowState>>({});
@@ -541,7 +616,7 @@ function ShortageTab({ items, cart, vendorMap, onAdd, onRemove, onChangeVendor, 
   if (!shortages.length) return (
     <div style={{ textAlign: 'center', padding: '48px 20px', color: '#9CA3AF' }}>
       <div style={{ fontSize: 44, marginBottom: 12 }}>✅</div>
-      <div style={{ fontSize: 14, fontWeight: 800 }}>Koi shortage nahi — sab stock mein</div>
+      <div style={{ fontSize: 14, fontWeight: 800 }}>No pending warehouse requests</div>
     </div>
   );
 
@@ -580,10 +655,30 @@ function ShortageTab({ items, cart, vendorMap, onAdd, onRemove, onChangeVendor, 
                       <div className="sr-info" style={{ flex: 1 }}>
                         <div className="sr-name">{item.name}</div>
                         <div className="sr-chips">
-                          <span className="chip short">Short: {item.shortfall} {item.unit}</span>
+                          <span className="chip manual">Req: {item.totalRequestedQty} {item.unit}</span>
                           <span className="chip stock">Stock: {item.stockQty} {item.unit}</span>
+                          <span className="chip short">Short: {item.shortfallQty} {item.unit}</span>
                           {item.lastPoDate && <span className="chip date">Last PO: {item.lastPoDate}</span>}
                         </div>
+                        {item.requestSources.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 7 }}>
+                            {summarizeSources(item.requestSources).map(source => (
+                              <span
+                                key={`${item.itemCode}-${source.warehouse}`}
+                                style={{
+                                  fontSize: 10,
+                                  fontWeight: 800,
+                                  padding: '3px 8px',
+                                  borderRadius: 999,
+                                  background: '#F8FAFC',
+                                  color: '#475569',
+                                  border: '1px solid var(--ln)',
+                                }}>
+                                {source.warehouse}: {source.qty} {item.unit}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       <button
                         className={`add-btn ${added ? 'added' : 'add'}`}
@@ -796,8 +891,11 @@ function AddItemsTab({ shortageItems, cart, vendorMap, token, onAdd, onRemove, o
                     <div className="srr-info">
                       <div className="srr-name">{item.name}</div>
                       <div className="srr-sub">
-                        {item.shortfall > 0 && (
-                          <span className="chip short" style={{ fontSize: 9 }}>⚠ Short {item.shortfall} {item.unit}</span>
+                        {item.totalRequestedQty > 0 && (
+                          <span className="chip manual" style={{ fontSize: 9 }}>Req {item.totalRequestedQty} {item.unit}</span>
+                        )}
+                        {item.shortfallQty > 0 && (
+                          <span className="chip short" style={{ fontSize: 9 }}>⚠ Short {item.shortfallQty} {item.unit}</span>
                         )}
                         {item.lastPoDate && (
                           <span className="chip date" style={{ fontSize: 9 }}>{item.lastPoDate}</span>
@@ -972,6 +1070,12 @@ function CartTab({ cart, vendorMap, shortageItems, token, onQtyChange, onRemove,
           price:     l.rate,
           vendor_id: l.vendorId,
           is_manual: l.isManual,
+          request_sources: l.requestSources.map(source => ({
+            requisition_id: source.requisitionId,
+            warehouse: source.warehouse,
+            requested_date: source.requestedDate,
+            remaining_qty: source.remainingQty,
+          })),
         })),
       }, token);
 
@@ -1035,7 +1139,7 @@ function CartTab({ cart, vendorMap, shortageItems, token, onQtyChange, onRemove,
     <div style={{ textAlign: 'center', padding: '48px 20px', color: '#9CA3AF' }}>
       <div style={{ fontSize: 44, marginBottom: 12 }}>🛒</div>
       <div style={{ fontSize: 14, fontWeight: 800 }}>Cart khaali hai</div>
-      <div style={{ fontSize: 12, marginTop: 6 }}>Shortage tab ya Add Items se items add karo</div>
+      <div style={{ fontSize: 12, marginTop: 6 }}>Requests tab ya Add Items se items add karo</div>
     </div>
   );
 
@@ -1147,10 +1251,35 @@ function CartTab({ cart, vendorMap, shortageItems, token, onQtyChange, onRemove,
                         <div className="cir-name">{line.name}</div>
                         <div className="cir-price">
                           {line.isManual && <span className="chip manual">Manual</span>}
+                          {line.requestedTotalQty > 0 && (
+                            <span className="chip stock">Req {line.requestedTotalQty} {line.unit}</span>
+                          )}
                           {line.vendorId !== line.autoVendorId && line.autoVendorId && (
                             <span className="chip auto">Changed</span>
                           )}
+                          {line.requestedTotalQty > 0 && n3(line.qty) !== n3(line.requestedTotalQty) && (
+                            <span className="chip date">Order {line.qty} / Req {line.requestedTotalQty}</span>
+                          )}
                         </div>
+                        {line.requestSources.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                            {summarizeSources(line.requestSources).map(source => (
+                              <span
+                                key={`${line.itemCode}-${source.warehouse}`}
+                                style={{
+                                  fontSize: 10,
+                                  fontWeight: 800,
+                                  padding: '3px 8px',
+                                  borderRadius: 999,
+                                  background: '#F8FAFC',
+                                  color: '#475569',
+                                  border: '1px solid var(--ln)',
+                                }}>
+                                {source.warehouse}: {source.qty} {line.unit}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       <div className="qty-ctrl">
                         <button className="qty-btn"
@@ -1382,11 +1511,44 @@ function HistoryTab({ orders, vendorMap, loading, token, onShare, onReorder, onR
             {expanded && order.lines.length > 0 && (
               <div style={{ borderTop: '1px solid var(--ln)' }}>
                 {order.lines.map(line => (
-                  <div key={line.itemCode} className="voc-item">
-                    <span className="voc-item-name">{line.name}</span>
-                    <span className="voc-item-qty">{line.qty} {line.unit}</span>
-                    <span style={{ fontSize: 10, color: '#9CA3AF', fontFamily: "'DM Mono',monospace" }}>{inr(line.rate)}</span>
-                    <span className="voc-item-val">{inr(line.qty * line.rate)}</span>
+                  <div key={line.itemCode} style={{ borderBottom: '1px solid var(--lnlt)' }}>
+                    <div className="voc-item">
+                      <span className="voc-item-name">{line.name}</span>
+                      <span className="voc-item-qty">{line.qty} {line.unit}</span>
+                      <span style={{ fontSize: 10, color: '#9CA3AF', fontFamily: "'DM Mono',monospace" }}>{inr(line.rate)}</span>
+                      <span className="voc-item-val">{inr(line.qty * line.rate)}</span>
+                    </div>
+                    <div style={{ padding: '0 14px 10px' }}>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {line.requestedTotalQty > 0 ? (
+                          <span className="chip stock">Requested {line.requestedTotalQty} {line.unit}</span>
+                        ) : (
+                          <span className="chip manual">No request snapshot</span>
+                        )}
+                        {line.requestedTotalQty > 0 && n3(line.qty) !== n3(line.requestedTotalQty) && (
+                          <span className="chip date">Ordered {line.qty} {line.unit}</span>
+                        )}
+                      </div>
+                      {line.requestSources.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                          {summarizeSources(line.requestSources).map(source => (
+                            <span
+                              key={`${line.itemCode}-${source.warehouse}`}
+                              style={{
+                                fontSize: 10,
+                                fontWeight: 800,
+                                padding: '3px 8px',
+                                borderRadius: 999,
+                                background: '#F8FAFC',
+                                color: '#475569',
+                                border: '1px solid var(--ln)',
+                              }}>
+                              {source.warehouse}: {source.qty} {line.unit}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 ))}
                 <div style={{ padding: '8px 14px', background: '#F8FAFC', borderTop: '1px solid var(--ln)',
@@ -1418,6 +1580,9 @@ function HistoryTab({ orders, vendorMap, loading, token, onShare, onReorder, onR
                   ...l,
                   autoVendorId: l.vendorId,
                   allVendors:   l.allVendors?.length ? l.allVendors : [],
+                  requestSources: [],
+                  requestedTotalQty: 0,
+                  isManual: true,
                 }));
                 onReorder(lines);
               }}>🔄 Re-order</button>
@@ -1474,6 +1639,12 @@ function ReviewScreen({ cart, vendorMap, token, onBack, onDone }: {
             price:      l.rate,
             vendor_id:  l.vendorId,
             is_manual:  l.isManual,
+            request_sources: l.requestSources.map(source => ({
+              requisition_id: source.requisitionId,
+              warehouse: source.warehouse,
+              requested_date: source.requestedDate,
+              remaining_qty: source.remainingQty,
+            })),
           })),
         },
         token
@@ -1795,12 +1966,14 @@ export default function VendorOrderPage() {
         itemCode:     item.itemCode,
         name:         item.name,
         unit:         item.unit,
-        qty:          item.shortfall > 0 ? item.shortfall : 1,
+        qty:          item.defaultOrderQty > 0 ? item.defaultOrderQty : 1,
         rate:         overridePrice ?? vEntry?.rate ?? item.lastRate,
         vendorId:     vendorId || '',
-        isManual:     item.shortfall === 0,
+        isManual:     item.requestSources.length === 0,
         autoVendorId: item.autoVendorId,
         allVendors:   item.allVendors,
+        requestSources: item.requestSources,
+        requestedTotalQty: item.totalRequestedQty,
       }];
     });
   }, []);
@@ -1835,7 +2008,13 @@ export default function VendorOrderPage() {
 
   const handleReorder = useCallback((lines: CartLine[]) => {
     // Replace cart completely — bump cartKey to force CartTab remount (clears lineStates, poResult, etc.)
-    const freshCart = lines.map(l => ({ ...l }));
+    const freshCart = lines.map(l => ({
+      ...l,
+      isManual: true,
+      autoVendorId: l.vendorId,
+      requestSources: [],
+      requestedTotalQty: 0,
+    }));
     setCart(freshCart);
     setCartKey(k => k + 1);
     setTab('cart');
@@ -1864,8 +2043,8 @@ export default function VendorOrderPage() {
 
   if (!token) return null;
 
-  const shortageCount  = shortageItems.filter(i => i.shortfall > 0).length;
-  const addedShortage  = shortageItems.filter(i => i.shortfall > 0 && cart.some(l => l.itemCode === i.itemCode)).length;
+  const shortageCount  = shortageItems.filter(i => i.totalRequestedQty > 0).length;
+  const addedShortage  = shortageItems.filter(i => i.totalRequestedQty > 0 && cart.some(l => l.itemCode === i.itemCode)).length;
   const vendorCount    = new Set(cart.map(l => l.vendorId)).size;
   const grandTotal     = cart.reduce((s, l) => s + l.qty * l.rate, 0);
 
@@ -1902,7 +2081,7 @@ export default function VendorOrderPage() {
         </div>
 
         <div className="vsumbar">
-          <div className="vsb r"><span className="vsbn">{shortageCount}</span><span className="vsbl">Shortage</span></div>
+          <div className="vsb r"><span className="vsbn">{shortageCount}</span><span className="vsbl">Requests</span></div>
           <div className="vsb o"><span className="vsbn">{addedShortage}</span><span className="vsbl">In order</span></div>
           <div className="vsb w"><span className="vsbn">{cart.length}</span><span className="vsbl">Cart items</span></div>
           <div className="vsb g"><span className="vsbn">{inr(grandTotal)}</span><span className="vsbl">Total</span></div>
@@ -1912,7 +2091,7 @@ export default function VendorOrderPage() {
       {/* Tabs */}
       <div className="vtabs">
         <button className={`vtab ${tab === 'shortage' ? 'on' : ''}`} onClick={() => setTab('shortage')}>
-          Shortage
+          Requests
           <span className={`vtabcnt ${shortageCount > 0 ? '' : 'muted'}`}>{shortageCount}</span>
         </button>
         <button className={`vtab ${tab === 'add' ? 'on' : ''}`} onClick={() => setTab('add')}>
@@ -1992,6 +2171,7 @@ export default function VendorOrderPage() {
           </div>
         </div>
       )}
+      <BottomNav />
     </div>
   );
 }

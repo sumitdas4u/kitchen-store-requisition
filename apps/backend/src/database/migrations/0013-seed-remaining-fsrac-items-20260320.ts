@@ -1,5 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm'
 
+const TARGET_COMPANY = 'Food Studio Restaurant and Cafe'
+
 // Seed warehouse-item mappings for the three warehouses that were added to
 // migration 0010 after it had already run:
 //   - Roll - China Town - FSRaC   (131 items)
@@ -120,10 +122,17 @@ export class SeedRemainingFsracItems20260320100000 implements MigrationInterface
   name = 'SeedRemainingFsracItems20260320100000'
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    const [settings] = await queryRunner.query(
-      `SELECT company FROM app_settings ORDER BY id LIMIT 1`,
-    )
-    const company: string = settings?.company ?? 'Food Studio'
+    await queryRunner.query(`
+      CREATE TABLE IF NOT EXISTS warehouse_items (
+        id SERIAL PRIMARY KEY,
+        warehouse VARCHAR(200) NOT NULL,
+        item_code VARCHAR(200) NOT NULL,
+        company VARCHAR(200) NOT NULL,
+        UNIQUE(warehouse, item_code)
+      );
+    `)
+
+    const company = TARGET_COMPANY
 
     for (const [warehouse, items] of Object.entries(WAREHOUSE_ITEMS)) {
       if (items.length === 0) continue

@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Logger, UnauthorizedException } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
-import { Repository } from 'typeorm'
+import { In, Repository } from 'typeorm'
 import { RequisitionStatus, Role } from '../common/enums'
 import { QueueService } from '../queue/queue.service'
 import { NotificationsService } from '../notifications/notifications.service'
@@ -10,6 +10,16 @@ import { IssueRequisitionDto } from './dto/issue-requisition.dto'
 import { ConfirmRequisitionDto } from './dto/confirm-requisition.dto'
 import { Requisition } from '../database/entities/requisition.entity'
 import { RequisitionItem } from '../database/entities/requisition-item.entity'
+import { ErpWarehouseCache } from '../database/entities/erp-warehouse-cache.entity'
+import {
+  assertRequisitionActionAllowed,
+  assertRequisitionTransition,
+  deriveIssuedItemStatus,
+  deriveReceivedItemStatus,
+  deriveStatusAfterConfirm,
+  deriveStatusAfterIssue,
+  RequisitionTransitionAction
+} from './requisition-state-machine'
 
 @Injectable()
 export class RequisitionService {
@@ -20,12 +30,140 @@ export class RequisitionService {
     private readonly requisitionsRepo: Repository<Requisition>,
     @InjectRepository(RequisitionItem)
     private readonly requisitionItemsRepo: Repository<RequisitionItem>,
+    @InjectRepository(ErpWarehouseCache)
+    private readonly warehouseCacheRepo: Repository<ErpWarehouseCache>,
     private readonly queueService: QueueService,
     private readonly notificationsService: NotificationsService,
     private readonly erpService: ErpService
   ) {}
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  private async resolveCompanyFromWarehouses(
+    fallbackCompany: string | null | undefined,
+    ...warehouses: Array<string | null | undefined>
+  ) {
+    const uniqueWarehouses = Array.from(
+      new Set(
+        warehouses
+          .map((warehouse) => warehouse?.trim())
+          .filter((warehouse): warehouse is string => Boolean(warehouse))
+      )
+    )
+
+    if (uniqueWarehouses.length > 0) {
+      const warehouseRows = await this.warehouseCacheRepo.find({
+        where: { name: In(uniqueWarehouses) }
+      })
+      const companies = Array.from(
+        new Set(
+          warehouseRows
+            .map((row) => row.company?.trim())
+            .filter((company): company is string => Boolean(company))
+        )
+      )
+
+      if (companies.length > 1) {
+        throw new BadRequestException(
+          'Selected warehouses belong to different companies in ERP'
+        )
+      }
+      if (companies[0]) {
+        return companies[0]
+      }
+    }
+
+    if (fallbackCompany?.trim()) {
+      return fallbackCompany.trim()
+    }
+
+    throw new BadRequestException('Company is required')
+  }
+
+  private async getEffectiveRequisitionCompany(requisition: Requisition) {
+    const company = await this.resolveCompanyFromWarehouses(
+      requisition.company,
+      requisition.source_warehouse,
+      requisition.warehouse
+    )
+
+    if (company !== requisition.company) {
+      requisition.company = company
+      await this.requisitionsRepo.save(requisition)
+    }
+
+    return company
+  }
+
+  private transitionStatus(
+    requisition: Requisition,
+    action: RequisitionTransitionAction,
+    nextStatus: RequisitionStatus,
+    errorMessage?: string
+  ) {
+    const previousStatus = requisition.status
+    const previousCompletedAt = requisition.completed_at
+
+    assertRequisitionTransition(
+      previousStatus,
+      nextStatus,
+      action,
+      errorMessage
+    )
+
+    requisition.status = nextStatus
+    if (nextStatus === RequisitionStatus.Completed) {
+      requisition.completed_at = requisition.completed_at ?? new Date()
+    } else {
+      requisition.completed_at = null
+    }
+
+    return {
+      changed: previousStatus !== nextStatus,
+      shouldPersist:
+        previousStatus !== nextStatus ||
+        previousCompletedAt !== requisition.completed_at
+    }
+  }
+
+  private async notifyIfStatusChanged(
+    requisitionId: number,
+    changed: boolean,
+    status: RequisitionStatus
+  ) {
+    if (!changed) {
+      return
+    }
+
+    await this.notificationsService.notifyStatusChange(
+      String(requisitionId),
+      status
+    )
+  }
+
+  /**
+   * Completion keeps the existing ERP behavior:
+   * - submit an already-created Stock Entry draft
+   * - otherwise enqueue the existing fallback draft-creation flow
+   */
+  private async enqueueCompletionSync(requisition: Requisition) {
+    if (requisition.stock_entry) {
+      await this.queueService.enqueueErpWrite('submit_stock_entry', {
+        action: 'submit_stock_entry',
+        payload: { name: requisition.stock_entry }
+      })
+      return
+    }
+
+    const hasActivity = requisition.items.some(
+      (item) => Number(item.received_qty) > 0 || Number(item.issued_qty) > 0
+    )
+    if (hasActivity) {
+      await this.queueService.enqueueCreateStockEntry({
+        requisitionId: String(requisition.id)
+      })
+    }
+  }
 
   private buildItems(dto: CreateRequisitionDto) {
     const items = dto.items
@@ -75,7 +213,8 @@ export class RequisitionService {
    * Only items with requested_qty > 0 go into the MR (actual_closing-only
    * items are handled separately via Stock Reconciliation).
    */
-  private buildMaterialRequestPayload(requisition: Requisition) {
+  private async buildMaterialRequestPayload(requisition: Requisition) {
+    const company = await this.getEffectiveRequisitionCompany(requisition)
     const mrItems = requisition.items
       .filter((item) => Number(item.requested_qty) > 0)
       .map((item) => ({
@@ -92,7 +231,7 @@ export class RequisitionService {
     return {
       doctype: 'Material Request',
       material_request_type: 'Material Transfer',
-      company: requisition.company,
+      company,
       transaction_date: requisition.requested_date,
       schedule_date: requisition.requested_date,
       set_warehouse: requisition.warehouse,
@@ -111,7 +250,7 @@ export class RequisitionService {
     const mrItems = requisition.items.filter((item) => Number(item.requested_qty) > 0)
     if (mrItems.length === 0) return // nothing to push to ERPNext
 
-    const mrPayload = this.buildMaterialRequestPayload(requisition)
+    const mrPayload = await this.buildMaterialRequestPayload(requisition)
     await this.queueService.enqueueErpWrite('create_material_request', {
       action: 'create_material_request',
       payload: {
@@ -127,7 +266,7 @@ export class RequisitionService {
   private async enqueueMaterialRequestUpdate(requisition: Requisition) {
     if (!requisition.erp_name) return // no MR created yet, nothing to update
 
-    const mrPayload = this.buildMaterialRequestPayload(requisition)
+    const mrPayload = await this.buildMaterialRequestPayload(requisition)
     await this.queueService.enqueueErpWrite('update_material_request', {
       action: 'update_material_request',
       payload: {
@@ -143,12 +282,12 @@ export class RequisitionService {
    */
   private async enqueueMaterialRequestSubmit(requisition: Requisition) {
     if (!requisition.erp_name) {
-      // MR not yet created — create + submit in one go
+      // MR not yet created â€” create + submit in one go
       // First create, the processor will set erp_name, then we submit
       const mrItems = requisition.items.filter((item) => Number(item.requested_qty) > 0)
       if (mrItems.length === 0) return
 
-      const mrPayload = this.buildMaterialRequestPayload(requisition)
+      const mrPayload = await this.buildMaterialRequestPayload(requisition)
       // Try synchronous creation so we can submit immediately
       try {
         const erpName = await this.erpService.createMaterialRequestDraft(mrPayload)
@@ -167,7 +306,7 @@ export class RequisitionService {
         })
       } catch (err: any) {
         this.logger.warn(`Failed to create MR for requisition ${requisition.id}: ${err.message}`)
-        // Mark as not synced — will be picked up by periodic sync
+        // Mark as not synced â€” will be picked up by periodic sync
         requisition.erp_synced = false
         await this.requisitionsRepo.save(requisition)
       }
@@ -183,7 +322,7 @@ export class RequisitionService {
     })
   }
 
-  // ── CRUD ───────────────────────────────────────────────────────────────────
+  // â”€â”€ CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async createDraft(
     user: {
@@ -198,10 +337,11 @@ export class RequisitionService {
       throw new UnauthorizedException('Warehouse not assigned')
     }
 
-    const company = user.company
-    if (!company) {
-      throw new BadRequestException('Company is required')
-    }
+    const company = await this.resolveCompanyFromWarehouses(
+      user.company,
+      user.source_warehouse,
+      user.default_warehouse
+    )
     const items = this.buildItems(dto)
 
     const requisition = this.requisitionsRepo.create({
@@ -270,10 +410,12 @@ export class RequisitionService {
 
   async submit(requisitionId: number) {
     const requisition = await this.getOne(requisitionId)
-    if (requisition.status !== RequisitionStatus.Draft) {
-      throw new BadRequestException('Only draft requisitions can be submitted')
-    }
-    requisition.status = RequisitionStatus.Submitted
+    this.transitionStatus(
+      requisition,
+      'submit',
+      RequisitionStatus.Submitted,
+      'Only draft requisitions can be submitted'
+    )
     requisition.submitted_at = new Date()
     requisition.erp_synced = false
     await this.requisitionsRepo.save(requisition)
@@ -301,7 +443,7 @@ export class RequisitionService {
     return { ok: true, status: requisition.status }
   }
 
-  // ── Read ───────────────────────────────────────────────────────────────────
+  // â”€â”€ Read â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async list(role: Role, warehouse?: string | null) {
     if (role === Role.Kitchen && warehouse) {
@@ -349,18 +491,15 @@ export class RequisitionService {
     return requisition
   }
 
-  // ── Issue (Store) ──────────────────────────────────────────────────────────
+  // â”€â”€ Issue (Store) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async issue(requisitionId: number, dto: IssueRequisitionDto) {
     const requisition = await this.getOne(requisitionId)
-    if (
-      ![
-        RequisitionStatus.Submitted,
-        RequisitionStatus.PartiallyIssued
-      ].includes(requisition.status)
-    ) {
-      throw new BadRequestException('Requisition is not ready to issue')
-    }
+    assertRequisitionActionAllowed(
+      requisition.status,
+      'issue',
+      'Requisition is not ready to issue'
+    )
     const itemMap = new Map(requisition.items.map((item) => [item.item_code, item]))
 
     const issuedItems: { item_code: string; item_name: string | null; qty: number; uom: string | null }[] = []
@@ -384,13 +523,7 @@ export class RequisitionService {
         )
       }
       existing.issued_qty = nextIssued
-      if (nextIssued === Number(existing.requested_qty)) {
-        existing.item_status = 'Issued'
-      } else if (nextIssued > 0) {
-        existing.item_status = 'Partially Issued'
-      } else {
-        existing.item_status = 'Rejected'
-      }
+      existing.item_status = deriveIssuedItemStatus(existing)
 
       if (issuedDelta > 0) {
         issuedItems.push({
@@ -402,14 +535,20 @@ export class RequisitionService {
       }
     })
 
-    const allIssued = requisition.items.every(
-      (item) => Number(item.issued_qty) === Number(item.requested_qty)
+    const requestedItems = requisition.items.filter(
+      (item) => Number(item.requested_qty) > 0
     )
-    const newStatus = allIssued
-      ? RequisitionStatus.Issued
-      : RequisitionStatus.PartiallyIssued
+    if (requestedItems.length === 0) {
+      throw new BadRequestException('Requisition has no requested items to issue')
+    }
 
-    requisition.status = newStatus
+    const newStatus = deriveStatusAfterIssue(requisition.items)
+    const { changed } = this.transitionStatus(
+      requisition,
+      'issue',
+      newStatus,
+      'Requisition is not ready to issue'
+    )
     requisition.issued_at = new Date()
     requisition.erp_synced = false
     if (dto.store_note !== undefined) {
@@ -421,17 +560,18 @@ export class RequisitionService {
     // Create Stock Entry (Material Transfer) in ERPNext for the issued items
     // Link each SE item to the Material Request via material_request + material_request_item
     if (issuedItems.length > 0) {
-      // Build a map of item_code → erp_mr_item_name for linking
+      // Build a map of item_code â†’ erp_mr_item_name for linking
       const mrItemMap = new Map(
         requisition.items
           .filter((i) => i.erp_mr_item_name)
           .map((i) => [i.item_code, i.erp_mr_item_name!])
       )
 
+      const company = await this.getEffectiveRequisitionCompany(requisition)
       const sePayload = {
         doctype: 'Stock Entry',
         stock_entry_type: 'Material Transfer',
-        company: requisition.company,
+        company,
         docstatus: 0,
         from_warehouse: requisition.source_warehouse,
         to_warehouse: requisition.warehouse,
@@ -462,23 +602,19 @@ export class RequisitionService {
       }
     }
 
-    await this.notificationsService.notifyStatusChange(String(requisitionId), newStatus)
+    await this.notifyIfStatusChanged(requisitionId, changed, newStatus)
     return { ok: true, status: newStatus }
   }
 
-  // ── Confirm (Kitchen) ─────────────────────────────────────────────────────
+  // â”€â”€ Confirm (Kitchen) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async confirm(requisitionId: number, dto: ConfirmRequisitionDto) {
     const requisition = await this.getOne(requisitionId)
-    if (
-      ![
-        RequisitionStatus.Submitted,
-        RequisitionStatus.Issued,
-        RequisitionStatus.PartiallyIssued
-      ].includes(requisition.status)
-    ) {
-      throw new BadRequestException('Requisition is not ready to confirm')
-    }
+    assertRequisitionActionAllowed(
+      requisition.status,
+      'confirm',
+      'Requisition is not ready to confirm'
+    )
     const itemMap = new Map(requisition.items.map((item) => [item.item_code, item]))
 
     dto.items.forEach((item) => {
@@ -486,7 +622,11 @@ export class RequisitionService {
       if (!existing) {
         throw new BadRequestException(`Item not found: ${item.item_code}`)
       }
-      if (item.received_qty > Number(existing.issued_qty)) {
+      const requestedQty = Number(existing.requested_qty || 0)
+      const issuedQty = Number(existing.issued_qty || 0)
+      const currentReceived = Number(existing.received_qty || 0)
+
+      if (item.received_qty > issuedQty) {
         throw new BadRequestException(
           `received_qty cannot exceed issued_qty for ${item.item_code}`
         )
@@ -496,80 +636,87 @@ export class RequisitionService {
           `received_qty must be 0 or greater for ${item.item_code}`
         )
       }
+      if (item.received_qty > requestedQty) {
+        throw new BadRequestException(
+          `received_qty cannot exceed requested_qty for ${item.item_code}`
+        )
+      }
       const desired =
         item.action === 'accept'
-          ? Number(existing.issued_qty)
+          ? Math.min(issuedQty, requestedQty)
           : item.action === 'reject'
-          ? Number(existing.received_qty || 0)
+          ? currentReceived
           : Number(item.received_qty)
-      const nextReceived = Math.max(Number(existing.received_qty || 0), desired)
-      existing.received_qty = nextReceived
-      if (nextReceived <= 0) {
-        existing.item_status = 'Rejected'
-      } else if (nextReceived < Number(existing.requested_qty)) {
-        existing.item_status = 'Partially Issued'
-      } else {
-        existing.item_status = 'Issued'
+
+      if (desired > issuedQty || desired > requestedQty) {
+        throw new BadRequestException(
+          `received_qty cannot exceed requested_qty for ${item.item_code}`
+        )
       }
+
+      const nextReceived = Math.max(currentReceived, desired)
+      existing.received_qty = nextReceived
+      existing.item_status = deriveReceivedItemStatus(existing)
     })
 
-    const newStatus = RequisitionStatus.PartiallyIssued
+    const requestedItems = requisition.items.filter(
+      (item) => Number(item.requested_qty) > 0
+    )
+    if (requestedItems.length === 0) {
+      throw new BadRequestException('Requisition has no requested items to confirm')
+    }
 
-    requisition.status = newStatus
-    requisition.completed_at = null
+    const newStatus = deriveStatusAfterConfirm(requisition.items)
+    const { changed } = this.transitionStatus(
+      requisition,
+      'confirm',
+      newStatus,
+      'Requisition is not ready to confirm'
+    )
     await this.requisitionsRepo.save(requisition)
     await this.requisitionItemsRepo.save(requisition.items)
 
-    await this.notificationsService.notifyStatusChange(String(requisitionId), newStatus)
+    if (newStatus === RequisitionStatus.Completed) {
+      await this.enqueueCompletionSync(requisition)
+    }
+
+    await this.notifyIfStatusChanged(requisitionId, changed, newStatus)
 
     return { ok: true, status: newStatus }
   }
 
-  // ── Finalize (Kitchen) ────────────────────────────────────────────────────
+  // â”€â”€ Finalize (Kitchen) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async finalize(requisitionId: number) {
     const requisition = await this.getOne(requisitionId)
-    if (
-      ![
-        RequisitionStatus.Issued,
-        RequisitionStatus.PartiallyIssued
-      ].includes(requisition.status)
-    ) {
-      throw new BadRequestException('Requisition is not ready to finalize')
+    const { changed, shouldPersist } = this.transitionStatus(
+      requisition,
+      'finalize',
+      RequisitionStatus.Completed,
+      'Requisition is not ready to finalize'
+    )
+    if (shouldPersist) {
+      await this.requisitionsRepo.save(requisition)
     }
-    requisition.status = RequisitionStatus.Completed
-    requisition.completed_at = new Date()
-    await this.requisitionsRepo.save(requisition)
-
-    if (requisition.stock_entry) {
-      // Draft Stock Entry already exists in ERP — submit it
-      await this.queueService.enqueueErpWrite('submit_stock_entry', {
-        action: 'submit_stock_entry',
-        payload: { name: requisition.stock_entry }
-      })
-    } else {
-      // No SE created during issue — create one now from received/issued quantities
-      const hasActivity = requisition.items.some(
-        (item) => Number(item.received_qty) > 0 || Number(item.issued_qty) > 0
-      )
-      if (hasActivity) {
-        await this.queueService.enqueueCreateStockEntry({
-          requisitionId: String(requisitionId)
-        })
-      }
+    if (changed) {
+      await this.enqueueCompletionSync(requisition)
     }
-
+    await this.notifyIfStatusChanged(requisitionId, changed, requisition.status)
     return { ok: true, status: requisition.status }
   }
 
-  // ── Reject / Cancel / Resolve ─────────────────────────────────────────────
+  // â”€â”€ Reject / Cancel / Resolve â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async reject(requisitionId: number, reason?: string) {
     const requisition = await this.getOne(requisitionId)
-    requisition.status = RequisitionStatus.Rejected
+    this.transitionStatus(
+      requisition,
+      'reject',
+      RequisitionStatus.Rejected,
+      'Requisition cannot be rejected in its current status'
+    )
     requisition.notes = reason || null
     await this.requisitionsRepo.save(requisition)
-
     // Cancel the MR in ERPNext if it exists
     if (requisition.erp_name) {
       await this.queueService.enqueueErpWrite('cancel_material_request', {
@@ -577,25 +724,19 @@ export class RequisitionService {
         payload: { erp_name: requisition.erp_name }
       })
     }
-
     return { ok: true }
   }
 
   async cancelByKitchen(requisitionId: number, reason?: string) {
     const requisition = await this.getOne(requisitionId)
-    if (
-      ![
-        RequisitionStatus.Submitted,
-        RequisitionStatus.Issued,
-        RequisitionStatus.PartiallyIssued
-      ].includes(requisition.status)
-    ) {
-      throw new BadRequestException('Only pending requisitions can be cancelled')
-    }
-    requisition.status = RequisitionStatus.Rejected
+    this.transitionStatus(
+      requisition,
+      'cancel',
+      RequisitionStatus.Rejected,
+      'Only pending requisitions can be cancelled'
+    )
     requisition.notes = reason || requisition.notes || null
     await this.requisitionsRepo.save(requisition)
-
     // Cancel the MR in ERPNext if it exists
     if (requisition.erp_name) {
       await this.queueService.enqueueErpWrite('cancel_material_request', {
@@ -603,19 +744,22 @@ export class RequisitionService {
         payload: { erp_name: requisition.erp_name }
       })
     }
-
     return { ok: true }
   }
 
   async resolve(requisitionId: number) {
     const requisition = await this.getOne(requisitionId)
-    requisition.status = RequisitionStatus.Completed
-    requisition.completed_at = new Date()
+    this.transitionStatus(
+      requisition,
+      'resolve',
+      RequisitionStatus.Completed,
+      'Requisition cannot be resolved in its current status'
+    )
     await this.requisitionsRepo.save(requisition)
     return { ok: true }
   }
 
-  // ── Store-initiated transfer (no kitchen request needed) ─────────────────
+  // â”€â”€ Store-initiated transfer (no kitchen request needed) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async listSentTransfers(sourceWarehouse: string): Promise<Requisition[]> {
     return this.requisitionsRepo.find({
@@ -645,12 +789,17 @@ export class RequisitionService {
     if (!dto.items?.length)    throw new BadRequestException('At least one item required')
 
     const today = new Date().toISOString().split('T')[0]
+    const company = await this.resolveCompanyFromWarehouses(
+      user.company,
+      user.source_warehouse,
+      dto.target_warehouse
+    )
 
     const req = this.requisitionsRepo.create({
       user_id:          user.user_id,
       warehouse:        dto.target_warehouse,
       source_warehouse: user.source_warehouse,
-      company:          user.company,
+      company,
       requested_date:   today,
       shift:            'Morning' as any,
       notes:            dto.note ?? null,
@@ -682,7 +831,7 @@ export class RequisitionService {
     let erpError: string | null = null
     try {
       // 1. Create and submit Material Request in ERPNext
-      const mrPayload = this.buildMaterialRequestPayload(saved)
+      const mrPayload = await this.buildMaterialRequestPayload(saved)
       const mrName = await this.erpService.createMaterialRequestDraft(mrPayload)
       saved.erp_name = mrName
       await this.erpService.submitMaterialRequest(mrName)
@@ -713,7 +862,7 @@ export class RequisitionService {
       const sePayload = {
         doctype: 'Stock Entry',
         stock_entry_type: 'Material Transfer',
-        company: user.company,
+        company,
         docstatus: 0,
         from_warehouse: user.source_warehouse,
         to_warehouse: dto.target_warehouse,

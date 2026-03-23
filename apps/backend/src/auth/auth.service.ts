@@ -20,12 +20,13 @@ export class AuthService {
     if (!valid) {
       throw new UnauthorizedException('Invalid credentials')
     }
+    const company = await this.usersService.resolveEffectiveCompany(user)
 
     const payload = {
       sub: user.id,
       username: user.username,
       role: user.role,
-      company: user.company,
+      company,
       default_warehouse: user.default_warehouse,
       source_warehouse: user.source_warehouse
     }
@@ -40,8 +41,8 @@ export class AuthService {
   }
 
   async bootstrap(dto: BootstrapDto) {
-    const count = await this.usersService.countUsers()
-    if (count > 0) {
+    const adminCount = await this.usersService.countAdmins()
+    if (adminCount > 0) {
       throw new ForbiddenException('Bootstrap already completed')
     }
 

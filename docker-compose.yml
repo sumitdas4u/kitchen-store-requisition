@@ -1,7 +1,4 @@
-version: '3.8'
-
 services:
-  # ── Infrastructure ────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -10,7 +7,7 @@ services:
       POSTGRES_USER: kitchen
       POSTGRES_PASSWORD: kitchen_pass
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -23,7 +20,7 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6380}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -32,28 +29,25 @@ services:
       timeout: 3s
       retries: 10
 
-  # ── Application ───────────────────────────────────────────────────────────
   app:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        # Baked into the Next.js bundle — must match the host-accessible backend URL.
-        # If you run on a remote server, override this: NEXT_PUBLIC_API_BASE_URL=http://<host>:3001
-        NEXT_PUBLIC_API_BASE_URL: http://localhost:3001
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3001}
     restart: unless-stopped
     env_file:
-      - .env                       # loads ERP keys, JWT_SECRET, WHATSAPP vars, etc.
+      - .env
     environment:
       NODE_ENV: production
       PORT: "3001"
-      # Override infra URLs to use Docker service names (not host.docker.internal)
       DATABASE_URL: postgresql://kitchen:kitchen_pass@postgres:5432/kitchen_app
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3001}
     ports:
-      - "3000:3000"   # Next.js frontend
-      - "3001:3001"   # NestJS backend
+      - "${FRONTEND_PORT:-3000}:3000"
+      - "${BACKEND_PORT:-3001}:3001"
     depends_on:
       postgres:
         condition: service_healthy

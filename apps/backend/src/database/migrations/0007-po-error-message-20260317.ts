@@ -5,14 +5,14 @@ export class PoErrorMessage20260317180000 implements MigrationInterface {
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
-      ALTER TABLE vendor_order_pos
+      ALTER TABLE IF EXISTS vendor_order_pos
         ADD COLUMN IF NOT EXISTS error_message TEXT;
     `)
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
-      ALTER TABLE vendor_order_pos DROP COLUMN IF EXISTS error_message;
+      ALTER TABLE IF EXISTS vendor_order_pos DROP COLUMN IF EXISTS error_message;
     `)
   }
 }

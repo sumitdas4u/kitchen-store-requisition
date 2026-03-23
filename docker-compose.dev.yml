@@ -1,11 +1,4 @@
-# ── Dev stack: hot-reload backend + frontend inside Docker ──────────────────
-# Usage:  docker compose -f docker-compose.dev.yml up --build
-#
-# Source code is bind-mounted so every save triggers recompile automatically.
-# Backend: NestJS --watch   |  Frontend: Next.js dev server (HMR)
-
 services:
-  # ── Infrastructure ──────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     environment:
@@ -13,7 +6,7 @@ services:
       POSTGRES_USER: kitchen
       POSTGRES_PASSWORD: kitchen_pass
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -25,7 +18,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6380}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -34,15 +27,15 @@ services:
       timeout: 3s
       retries: 15
 
-  # ── Dependency installer (runs once, then exits) ────────────────────────────
   deps:
-    image: node:20-alpine
+    image: node:20-bookworm-slim
     working_dir: /app
     command: >
       sh -c "
-        echo '⏳ Installing dependencies…' &&
-        npm install &&
-        echo '✅ Dependencies installed' &&
+        rm -f /app/.deps-ready &&
+        echo 'Installing dependencies...' &&
+        npm ci &&
+        echo 'Dependencies installed' &&
         touch /app/.deps-ready
       "
     volumes:
@@ -52,31 +45,28 @@ services:
       - frontend_node_modules:/app/apps/frontend/node_modules
     restart: "no"
 
-  # ── Backend (NestJS, auto-recompiles on save) ───────────────────────────────
   backend:
-    image: node:20-alpine
+    image: node:20-bookworm-slim
     working_dir: /app
-    command: >
-      sh -c "
-        echo '⏳ Waiting for dependencies…' &&
-        while [ ! -f /app/.deps-ready ]; do sleep 1; done &&
-        echo '🚀 Starting backend…' &&
-        npx nest start --watch
-      "
     env_file:
       - .env
+    command: >
+      sh -c "
+        echo 'Waiting for dependencies...' &&
+        while [ ! -f /app/.deps-ready ]; do sleep 1; done &&
+        echo 'Starting backend...' &&
+        npm --workspace apps/backend run start:dev
+      "
     environment:
       NODE_ENV: development
       PORT: "3001"
-      # Override to use Docker service names instead of host.docker.internal
       DATABASE_URL: postgresql://kitchen:kitchen_pass@postgres:5432/kitchen_app
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      # File-watching: use polling so changes on Windows/macOS host are detected
       CHOKIDAR_USEPOLLING: "true"
       CHOKIDAR_INTERVAL: "1000"
     ports:
-      - "3001:3001"
+      - "${BACKEND_PORT:-3001}:3001"
     volumes:
       - ./:/app
       - root_node_modules:/app/node_modules
@@ -90,24 +80,23 @@ services:
       deps:
         condition: service_completed_successfully
 
-  # ── Frontend (Next.js dev server, HMR auto-refreshes the browser) ───────────
   frontend:
-    image: node:20-alpine
+    image: node:20-bookworm-slim
     working_dir: /app
+    env_file:
+      - .env
     command: >
       sh -c "
-        echo '⏳ Waiting for dependencies…' &&
+        echo 'Waiting for dependencies...' &&
         while [ ! -f /app/.deps-ready ]; do sleep 1; done &&
-        echo '🚀 Starting frontend…' &&
-        npx next dev apps/frontend -p 3000 -H 0.0.0.0
+        echo 'Starting frontend...' &&
+        npm --workspace apps/frontend run dev -- --hostname 0.0.0.0 -p 3000
       "
     environment:
       NODE_ENV: development
-      NEXT_PUBLIC_API_BASE_URL: http://localhost:3001
-      # File-watching: use polling so changes on Windows/macOS host are detected
       WATCHPACK_POLLING: "true"
     ports:
-      - "3000:3000"
+      - "${FRONTEND_PORT:-3000}:3000"
     volumes:
       - ./:/app
       - root_node_modules:/app/node_modules
