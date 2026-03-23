@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { ShieldCheck } from 'lucide-react';
 import { apiRequest } from '../../../lib/api';
 import { saveSession } from '../../../lib/session';
+import { AppBuildInfo } from '../AppBuildInfo';
 
 export function AdminLogin() {
   const router = useRouter();
@@ -87,6 +88,8 @@ export function AdminLogin() {
           </button>
           {error ? <p className="text-sm text-red-600">{error}</p> : null}
         </form>
+
+        <AppBuildInfo className="mt-4 text-center" />
       </div>
     </div>
   );

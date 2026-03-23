@@ -22,7 +22,11 @@ RUN npm --workspace apps/backend run build
 
 # Build frontend
 ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:3001
+ARG NEXT_PUBLIC_APP_VERSION=
+ARG NEXT_PUBLIC_BUILD_STAMP=
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_APP_VERSION=$NEXT_PUBLIC_APP_VERSION
+ENV NEXT_PUBLIC_BUILD_STAMP=$NEXT_PUBLIC_BUILD_STAMP
 RUN npm --workspace apps/frontend run build
 
 # Stage 2: production image
@@ -41,6 +45,11 @@ COPY --from=builder /app/apps/backend/dist apps/backend/dist
 COPY --from=builder /app/apps/frontend/.next apps/frontend/.next
 COPY --from=builder /app/apps/frontend/public apps/frontend/public
 COPY --from=builder /app/apps/frontend/next.config.mjs apps/frontend/next.config.mjs
+
+ARG NEXT_PUBLIC_APP_VERSION=
+ARG NEXT_PUBLIC_BUILD_STAMP=
+ENV NEXT_PUBLIC_APP_VERSION=$NEXT_PUBLIC_APP_VERSION
+ENV NEXT_PUBLIC_BUILD_STAMP=$NEXT_PUBLIC_BUILD_STAMP
 
 EXPOSE 3000 3001
 

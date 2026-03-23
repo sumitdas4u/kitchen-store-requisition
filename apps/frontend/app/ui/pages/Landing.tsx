@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { ChefHat, Package, LayoutDashboard } from 'lucide-react';
+import { AppBuildInfo } from '../AppBuildInfo';
 
 export function Landing() {
   const router = useRouter();
@@ -43,6 +44,7 @@ export function Landing() {
           <p className="text-lg text-gray-600">
             Integrated with ERPNext for seamless inventory management
           </p>
+          <AppBuildInfo className="mt-4" />
         </div>
 
         <div className="grid md:grid-cols-3 gap-6">

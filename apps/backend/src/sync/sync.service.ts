@@ -331,10 +331,10 @@ export class SyncService {
   private async syncMaterialRequests(): Promise<number> {
     let synced = 0
 
-    // 1. Push unsynced local requisitions (Draft or Submitted without erp_name)
+    // 1. Push unsynced submitted requisitions without erp_name, or refresh
+    // already-linked requisitions whose last ERP sync state is stale.
     const unsynced = await this.requisitionsRepo.find({
       where: [
-        { erp_name: IsNull(), status: RequisitionStatus.Draft },
         { erp_name: IsNull(), status: RequisitionStatus.Submitted },
         { erp_synced: false, erp_name: Not(IsNull()) }
       ],
@@ -344,38 +344,45 @@ export class SyncService {
     for (const req of unsynced) {
       try {
         if (!req.erp_name) {
-          // Create MR in ERPNext
           const mrItems = req.items.filter((item) => Number(item.requested_qty) > 0)
           if (mrItems.length === 0) continue
 
-          const mrPayload = {
-            doctype: 'Material Request',
-            material_request_type: 'Material Transfer',
-            company: req.company,
-            transaction_date: req.requested_date,
-            schedule_date: req.requested_date,
-            set_warehouse: req.warehouse,
-            custom_shift: req.shift ?? undefined,
-            custom_local_id: String(req.id),
-            items: mrItems.map((item) => ({
-              item_code: item.item_code,
-              item_name: item.item_name ?? undefined,
-              qty: Number(item.requested_qty),
-              uom: item.uom ?? undefined,
-              stock_uom: item.uom ?? undefined,
-              warehouse: req.source_warehouse,
-              schedule_date: req.requested_date,
-              conversion_factor: 1
-            }))
-          }
+          const existingMr = await this.erpService.findMaterialRequestByLocalId(
+            String(req.id)
+          )
 
-          const erpName = await this.erpService.createMaterialRequestDraft(mrPayload)
+          const erpName =
+            existingMr?.name ??
+            (await this.erpService.createMaterialRequestDraft({
+              doctype: 'Material Request',
+              material_request_type: 'Material Transfer',
+              company: req.company,
+              transaction_date: req.requested_date,
+              schedule_date: req.requested_date,
+              set_warehouse: req.warehouse,
+              custom_shift: req.shift ?? undefined,
+              custom_local_id: String(req.id),
+              items: mrItems.map((item) => ({
+                item_code: item.item_code,
+                item_name: item.item_name ?? undefined,
+                qty: Number(item.requested_qty),
+                uom: item.uom ?? undefined,
+                stock_uom: item.uom ?? undefined,
+                warehouse: req.source_warehouse,
+                schedule_date: req.requested_date,
+                conversion_factor: 1
+              }))
+            }))
+
           req.erp_name = erpName
           req.erp_synced = true
           req.last_synced_at = new Date()
 
           // If already submitted locally, submit in ERPNext too
-          if (req.status === RequisitionStatus.Submitted) {
+          if (
+            req.status === RequisitionStatus.Submitted &&
+            existingMr?.docstatus !== 1
+          ) {
             await this.erpService.submitMaterialRequest(erpName)
           }
 

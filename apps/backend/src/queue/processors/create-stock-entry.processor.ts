@@ -2,7 +2,7 @@ import { Processor, WorkerHost } from '@nestjs/bullmq'
 import { Job } from 'bullmq'
 import { Injectable } from '@nestjs/common'
 import { QUEUE_NAMES } from '../../common/constants'
-import { StockEntrySyncStatus } from '../../common/enums'
+import { RequisitionStatus, StockEntrySyncStatus } from '../../common/enums'
 import { ErpService } from '../../erp/erp.service'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
@@ -54,22 +54,35 @@ export class CreateStockEntryProcessor extends WorkerHost {
       items: activeItems.map((item) => ({
         item_code: item.item_code,
         item_name: item.item_name,
-        qty: Number(item.received_qty) > 0 ? Number(item.received_qty) : Number(item.issued_qty),
+        qty:
+          Number(item.received_qty) > 0
+            ? Number(item.received_qty)
+            : Number(item.issued_qty),
         uom: item.uom,
         stock_uom: item.uom,
         s_warehouse: requisition.source_warehouse,
         t_warehouse: requisition.warehouse,
         conversion_factor: 1,
-        // Link to Material Request at item level
-        ...(requisition.erp_name ? { material_request: requisition.erp_name } : {}),
-        ...(item.erp_mr_item_name ? { material_request_item: item.erp_mr_item_name } : {})
+        ...(requisition.erp_name && item.erp_mr_item_name
+          ? {
+              material_request: requisition.erp_name,
+              material_request_item: item.erp_mr_item_name
+            }
+          : {})
       }))
     }
 
     try {
       const stockEntryName = await this.erpService.createStockEntryDraft(payload)
       requisition.stock_entry = stockEntryName
-      requisition.stock_entry_status = StockEntrySyncStatus.DraftCreated
+
+      if (requisition.status === RequisitionStatus.Completed) {
+        await this.erpService.submitStockEntry(stockEntryName)
+        requisition.stock_entry_status = StockEntrySyncStatus.Submitted
+      } else {
+        requisition.stock_entry_status = StockEntrySyncStatus.DraftCreated
+      }
+
       requisition.stock_entry_error_message = null
       requisition.stock_entry_last_attempt_at = new Date()
       requisition.erp_synced = true

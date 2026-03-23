@@ -109,13 +109,13 @@ Important actual behavior:
 
 | Business step | ERPNext document | Created when | Submitted when |
 |---|---|---|---|
-| Kitchen draft with requested items | Material Request | On `createDraft()` via queue | Not yet submitted |
-| Kitchen draft update | Material Request update | On `updateDraft()` | Not yet submitted |
-| Kitchen submit | Material Request | If needed, created immediately on submit or already exists | `submit_material_request` is queued |
+| Kitchen draft with requested items | None | No ERP document is created yet | Not applicable |
+| Kitchen draft update | None | Draft stays local until submit | Not applicable |
+| Kitchen submit | Material Request | Created or reused on `submit()` | `submit_material_request` is queued |
 | Kitchen submit with actual closing mismatch | Stock Reconciliation | Queue processor creates draft | Submitted immediately in the same processor |
 | Store issues requisition | Stock Entry | Created immediately as draft in `issue()` | Submitted later on kitchen finalize |
 | Kitchen finalize with existing stock entry | Stock Entry | Already exists | `submit_stock_entry` is queued |
-| Kitchen finalize without existing stock entry | Stock Entry | `create-stock-entry` queue creates draft | Not auto-submitted in the same path |
+| Kitchen finalize without existing stock entry | Stock Entry | `create-stock-entry` queue creates draft | Submitted immediately when the requisition is already `Completed` |
 | Store creates direct transfer | Material Request | Created immediately in `createAndIssueFromStore()` | Submitted immediately in the same flow |
 | Store creates direct transfer | Stock Entry | Created immediately as draft | Submitted later when kitchen finalizes |
 | Store creates vendor order | Purchase Order | Created immediately per vendor | Submitted immediately after create |
@@ -133,8 +133,8 @@ Local effects:
 - `requisition_items.item_status = Pending`
 
 ERPNext effects:
-- If the draft contains at least one item with `requested_qty > 0`, a Material Request draft is queued in ERPNext.
-- The local record is updated with `erp_name` once the queue succeeds.
+- No ERP Material Request is created yet.
+- The draft stays local until kitchen submits it.
 
 ### Step 2. Kitchen submits the requisition
 
@@ -144,8 +144,8 @@ Local effects:
 - store notification is emitted
 
 ERPNext effects:
-- Material Request is submitted in ERPNext.
-- If the Material Request draft does not exist yet, submit first creates it and then queues submit.
+- Material Request is created or reused in ERPNext and then queued for submit.
+- `custom_local_id` is used to prevent duplicate Material Requests for the same requisition.
 - If any item has `actual_closing != closing_stock`, a Stock Reconciliation is created and immediately submitted in ERPNext.
 
 ### Step 3. Store reviews and issues stock
@@ -174,7 +174,7 @@ Local effects:
 
 ERPNext effects:
 - If the requisition auto-completes and a Stock Entry draft already exists, `confirm()` queues ERP submission of that draft.
-- If the requisition auto-completes and no Stock Entry draft exists yet, `confirm()` queues the existing fallback Stock Entry draft-creation path.
+- If the requisition auto-completes and no Stock Entry draft exists yet, `confirm()` queues the fallback Stock Entry create-and-submit path.
 - Partial and rejected confirmations do not create a new ERP document in `confirm()`
 
 ### Step 5. Kitchen finalizes
@@ -189,7 +189,7 @@ ERPNext effects:
 - If the requisition is already `Completed`, `finalize()` is a no-op and does not duplicate ERP submission.
 
 Important nuance:
-- In the fallback path, the queue creates a Stock Entry draft and stores `stock_entry`, but that path does not auto-submit the new draft inside `finalize()`.
+- In the fallback path, the queue creates the Stock Entry and immediately submits it when the requisition is already `Completed`.
 
 ## 7. Store-Initiated Transfer Flow
 
@@ -335,7 +335,7 @@ Flow:
 
 ## 13. Key Corrections To Remember
 
-- Material Request draft creation starts at kitchen draft creation, not only at submit time.
+- Normal kitchen drafts stay local; the ERP Material Request is created or reused on submit.
 - Vendor demand groups pending warehouse requests by item and uses `requested_qty - issued_qty`.
 - Store can order full requested quantity even if current stock makes shortfall smaller.
 - `confirm()` auto-completes when `received_qty` reaches `requested_qty` for every requested item.

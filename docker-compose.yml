@@ -35,6 +35,8 @@ services:
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3001}
+        NEXT_PUBLIC_APP_VERSION: ${NEXT_PUBLIC_APP_VERSION:-}
+        NEXT_PUBLIC_BUILD_STAMP: ${NEXT_PUBLIC_BUILD_STAMP:-}
     restart: unless-stopped
     env_file:
       - .env
@@ -45,6 +47,8 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3001}
+      NEXT_PUBLIC_APP_VERSION: ${NEXT_PUBLIC_APP_VERSION:-}
+      NEXT_PUBLIC_BUILD_STAMP: ${NEXT_PUBLIC_BUILD_STAMP:-}
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
       - "${BACKEND_PORT:-3001}:3001"

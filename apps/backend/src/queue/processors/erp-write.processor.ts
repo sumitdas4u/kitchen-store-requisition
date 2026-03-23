@@ -4,7 +4,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
 import { QUEUE_NAMES } from '../../common/constants'
-import { StockEntrySyncStatus } from '../../common/enums'
+import { RequisitionStatus, StockEntrySyncStatus } from '../../common/enums'
 import { ErpService } from '../../erp/erp.service'
 import { Requisition } from '../../database/entities/requisition.entity'
 import { RequisitionItem } from '../../database/entities/requisition-item.entity'
@@ -82,8 +82,17 @@ export class ErpWriteProcessor extends WorkerHost {
       case 'submit_stock_entry': {
         const stockEntryName = String(payload.name)
         const requisitionId = Number(payload.requisition_id || 0)
+        const draftPayload = payload.draft_payload as
+          | Record<string, unknown>
+          | undefined
 
         try {
+          if (draftPayload) {
+            await this.erpService.updateStockEntryDraft(
+              stockEntryName,
+              draftPayload
+            )
+          }
           await this.erpService.submitStockEntry(stockEntryName)
 
           if (requisitionId > 0) {
@@ -119,8 +128,46 @@ export class ErpWriteProcessor extends WorkerHost {
       case 'create_material_request': {
         const mrPayload = payload.mr_payload as Record<string, unknown>
         const requisitionId = Number(payload.requisition_id)
-        const erpName = await this.erpService.createMaterialRequestDraft(mrPayload)
-        this.logger.log(`Created MR ${erpName} for requisition ${requisitionId}`)
+
+        const requisition =
+          requisitionId > 0
+            ? await this.requisitionsRepo.findOne({
+                where: { id: requisitionId },
+                relations: ['items']
+              })
+            : null
+
+        if (requisitionId > 0 && !requisition) {
+          this.logger.warn(
+            `Skipping MR create because requisition ${requisitionId} no longer exists`
+          )
+          return
+        }
+
+        if (requisition?.status === RequisitionStatus.Draft) {
+          this.logger.log(
+            `Skipping MR create for draft requisition ${requisitionId}`
+          )
+          return requisition.erp_name ?? null
+        }
+
+        if (requisition?.erp_name) {
+          await this.storeMrItemNames(requisition.erp_name, requisitionId)
+          return requisition.erp_name
+        }
+
+        const existingMr =
+          requisitionId > 0
+            ? await this.erpService.findMaterialRequestByLocalId(
+                String(requisitionId)
+              )
+            : null
+        const erpName =
+          existingMr?.name ??
+          (await this.erpService.createMaterialRequestDraft(mrPayload))
+        this.logger.log(
+          `${existingMr ? 'Reused' : 'Created'} MR ${erpName} for requisition ${requisitionId}`
+        )
 
         // Update local record with ERP name
         await this.requisitionsRepo.update(requisitionId, {

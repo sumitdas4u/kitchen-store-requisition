@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { ChefHat } from 'lucide-react';
 import { apiRequest } from '../../../lib/api';
 import { saveSession } from '../../../lib/session';
+import { AppBuildInfo } from '../AppBuildInfo';
 
 export function KitchenLogin() {
   const router = useRouter();
@@ -111,6 +112,8 @@ export function KitchenLogin() {
             </button>
           </div>
         </form>
+
+        <AppBuildInfo className="mt-4 text-center" />
       </div>
     </div>
   );

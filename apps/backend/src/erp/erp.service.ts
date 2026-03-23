@@ -767,6 +767,21 @@ export class ErpService {
     }
   }
 
+  async updateStockEntryDraft(
+    name: string,
+    payload: Record<string, unknown>
+  ): Promise<void> {
+    await this.ensureBaseUrl()
+    try {
+      await this.client.put(
+        `/api/resource/Stock Entry/${encodeURIComponent(name)}`,
+        payload
+      )
+    } catch (error) {
+      this.throwErpError(error)
+    }
+  }
+
   async createStockReconciliationDraft(
     payload: Record<string, unknown>
   ): Promise<string> {
@@ -1153,6 +1168,42 @@ export class ErpService {
   }
 
   // ── Material Request ────────────────────────────────────────────────────────
+
+  async findMaterialRequestByLocalId(
+    localId: string
+  ): Promise<ErpMaterialRequestSummary | null> {
+    await this.ensureBaseUrl()
+    const fields = JSON.stringify([
+      'name',
+      'material_request_type',
+      'status',
+      'docstatus',
+      'company',
+      'transaction_date',
+      'schedule_date',
+      'set_warehouse',
+      'per_ordered',
+      'custom_shift',
+      'custom_local_id'
+    ])
+    const filters = JSON.stringify([
+      ['material_request_type', '=', 'Material Transfer'],
+      ['custom_local_id', '=', String(localId)]
+    ])
+
+    try {
+      const response = await this.client.get(
+        `/api/resource/Material Request?fields=${encodeURIComponent(fields)}&filters=${encodeURIComponent(filters)}&order_by=modified desc&limit_page_length=1`
+      )
+      const rows = response.data.data as ErpMaterialRequestSummary[]
+      return rows[0] ?? null
+    } catch (error) {
+      if (this.isPermissionError(error) || this.isFilterFieldError(error)) {
+        return null
+      }
+      this.throwErpError(error)
+    }
+  }
 
   async createMaterialRequestDraft(payload: Record<string, unknown>): Promise<string> {
     await this.ensureBaseUrl()

@@ -1,6 +1,13 @@
 'use client';
 
-import { useMemo, useState, useEffect, Dispatch, SetStateAction } from 'react';
+import {
+  useMemo,
+  useState,
+  useEffect,
+  useDeferredValue,
+  Dispatch,
+  SetStateAction
+} from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { apiRequest } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
@@ -233,6 +240,20 @@ const CSS_PARTS: string[] = [
   `.date-lbl{font-size:11px;font-weight:800;color:var(--md);text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}`,
   `.date-inp{flex:1;padding:7px 10px;border:1.5px solid #E5E7EB;border-radius:8px;font-family:'Nunito',sans-serif;font-size:13px;font-weight:700;color:var(--dk);background:var(--bg);appearance:none}`,
   `.date-inp:focus{outline:none;border-color:var(--or);background:var(--wh)}`,
+  ``,
+  `/* -- SEARCH -- */`,
+  `.search-wrap{background:var(--wh);padding:10px 16px 12px;border-bottom:1px solid var(--line)}`,
+  `.search-box{display:flex;align-items:center;gap:8px;padding:10px 12px;border:1.5px solid #E5E7EB;border-radius:12px;background:#F9FAFB}`,
+  `.search-box.active{border-color:#FDBA74;background:var(--orl)}`,
+  `.search-ic{font-size:14px;line-height:1;color:#9CA3AF;flex-shrink:0}`,
+  `.search-inp{flex:1;border:none;background:transparent;font-family:'Nunito',sans-serif;font-size:13px;font-weight:800;color:var(--dk)}`,
+  `.search-inp:focus{outline:none}`,
+  `.search-inp::placeholder{color:#9CA3AF}`,
+  `.search-clear{border:none;background:transparent;color:var(--or);font-family:'Nunito',sans-serif;font-size:11px;font-weight:900;cursor:pointer;flex-shrink:0}`,
+  `.search-meta{margin-top:7px;font-size:10px;font-weight:800;color:#6B7280}`,
+  `.search-empty{margin:14px 16px 0;padding:18px 16px;border:1.5px dashed #E5E7EB;border-radius:12px;background:#F9FAFB;text-align:center}`,
+  `.search-empty-title{font-size:13px;font-weight:900;color:var(--dk)}`,
+  `.search-empty-sub{margin-top:4px;font-size:11px;font-weight:700;color:#6B7280;line-height:1.45}`,
 ];
 
 const CSS = CSS_PARTS.join('');
@@ -348,6 +369,8 @@ function Browse({
   const [open, setOpen] = useState<Record<string, boolean>>(
     groups.length ? { [groups[0].id]: true } : {}
   );
+  const [search, setSearch] = useState('');
+  const deferredSearch = useDeferredValue(search.trim().toLowerCase());
 
   useEffect(() => {
     if (groups.length === 0) return;
@@ -355,6 +378,25 @@ function Browse({
   }, [groups]);
 
   const allItems = useMemo(() => groups.flatMap((g) => g.items), [groups]);
+  const visibleGroups = useMemo(() => {
+    if (!deferredSearch) return groups;
+
+    const terms = deferredSearch.split(/\s+/).filter(Boolean);
+    return groups
+      .map((group) => ({
+        ...group,
+        items: group.items.filter((item) => {
+          const haystack = `${item.name} ${item.code} ${group.name}`.toLowerCase();
+          return terms.every((term) => haystack.includes(term));
+        })
+      }))
+      .filter((group) => group.items.length > 0);
+  }, [groups, deferredSearch]);
+  const visibleItemCount = useMemo(
+    () => visibleGroups.reduce((count, group) => count + group.items.length, 0),
+    [visibleGroups]
+  );
+  const isSearching = deferredSearch.length > 0;
 
   const totals = useMemo(
     () =>
@@ -409,6 +451,32 @@ function Browse({
         <input className="date-inp" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
       </div>
 
+      <div className="search-wrap">
+        <div className={`search-box ${isSearching ? 'active' : ''}`}>
+          <span className="search-ic">/</span>
+          <input
+            className="search-inp"
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search item or code"
+            aria-label="Search items"
+          />
+          {search.trim().length > 0 && (
+            <button className="search-clear" type="button" onClick={() => setSearch('')}>
+              Clear
+            </button>
+          )}
+        </div>
+        {isSearching && (
+          <div className="search-meta">
+            {visibleItemCount > 0
+              ? `${visibleItemCount} item${visibleItemCount === 1 ? '' : 's'} found`
+              : 'No items match this search'}
+          </div>
+        )}
+      </div>
+
       <div className="summary">
         <div className="sm">
           <span className="sm-l">Used</span>
@@ -430,14 +498,17 @@ function Browse({
         <span className="ch-ord">Mangna kitna?</span>
       </div>
 
-      {groups.map((group) => {
-        const isOpen = open[group.id];
+      {visibleGroups.map((group) => {
+        const isOpen = isSearching ? true : open[group.id];
         const ordCnt = group.items.filter((i) => (orders[i.id] ?? 0) > 0).length;
         return (
           <div key={group.id}>
             <div
               className={`grp-hdr ${isOpen ? 'open' : ''}`}
-              onClick={() => setOpen((p) => ({ ...p, [group.id]: !p[group.id] }))}
+              onClick={() => {
+                if (isSearching) return;
+                setOpen((p) => ({ ...p, [group.id]: !p[group.id] }));
+              }}
             >
               <span className="gh-em">{group.emoji}</span>
               <span className="gh-name">{group.name}</span>
@@ -475,6 +546,15 @@ function Browse({
           </div>
         );
       })}
+
+      {isSearching && visibleGroups.length === 0 && (
+        <div className="search-empty">
+          <div className="search-empty-title">No matching items</div>
+          <div className="search-empty-sub">
+            Try item name, code, or a shorter keyword.
+          </div>
+        </div>
+      )}
 
       <div style={{ height: 140 }} />
 

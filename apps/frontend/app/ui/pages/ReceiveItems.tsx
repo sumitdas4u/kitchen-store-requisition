@@ -26,6 +26,9 @@ interface Requisition {
 }
 
 const n3 = (v: number): number => parseFloat(Number(v).toFixed(3));
+const hasRequestedQty = (item: {
+  requested_qty?: number | string;
+}): boolean => Number(item.requested_qty || 0) > 0;
 const fmtDate = (d: string): string => {
   const [, m, day] = d.split('-');
   return `${day}/${m}`;
@@ -153,6 +156,11 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 .section-sep{font-size:10px;font-weight:800;color:var(--lt);
   text-transform:uppercase;letter-spacing:.06em;
   padding:2px 14px 4px}
+.empty-state{background:var(--wh);border:1.5px dashed #CBD5E1;border-radius:16px;
+  padding:22px 18px;text-align:center;color:#64748B;
+  box-shadow:0 1px 4px rgba(0,0,0,.05)}
+.empty-state-title{font-size:15px;font-weight:900;color:var(--dk)}
+.empty-state-sub{font-size:12px;font-weight:700;margin-top:6px;line-height:1.45}
 
 /* BOTTOM BAR */
 .bbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);
@@ -342,34 +350,36 @@ export function ReceiveItems() {
     if (!token || !id) return;
     apiRequest<any>(`/requisition/${id}`, 'GET', undefined, token ?? undefined)
       .then((data) => {
-        const mapped: ReqItem[] = (data.items || []).map((item: any) => {
-          const requested = Number(item.requested_qty || 0);
-          const issued = Number(item.issued_qty || 0);
-          const received = Number(item.received_qty || 0);
-          let itemStatus: ItemStatus = 'Pending';
-          let initialReceived = received;
-          if (received > 0) {
-            itemStatus = received >= requested ? 'Accepted' : 'Partial';
-          } else if (issued === 0) {
-            itemStatus = 'Pending';
-            initialReceived = 0;
-          } else if (issued < requested) {
-            itemStatus = 'Partial';
-            initialReceived = issued;
-          } else {
-            itemStatus = 'Accepted';
-            initialReceived = issued;
-          }
-          return {
-            id: item.item_code,
-            name: item.item_name || item.item_code,
-            unit: item.uom,
-            requested,
-            issued,
-            received: initialReceived,
-            itemStatus
-          };
-        });
+        const mapped: ReqItem[] = (data.items || [])
+          .filter((item: any) => hasRequestedQty(item))
+          .map((item: any) => {
+            const requested = Number(item.requested_qty || 0);
+            const issued = Number(item.issued_qty || 0);
+            const received = Number(item.received_qty || 0);
+            let itemStatus: ItemStatus = 'Pending';
+            let initialReceived = received;
+            if (received > 0) {
+              itemStatus = received >= requested ? 'Accepted' : 'Partial';
+            } else if (issued === 0) {
+              itemStatus = 'Pending';
+              initialReceived = 0;
+            } else if (issued < requested) {
+              itemStatus = 'Partial';
+              initialReceived = issued;
+            } else {
+              itemStatus = 'Accepted';
+              initialReceived = issued;
+            }
+            return {
+              id: item.item_code,
+              name: item.item_name || item.item_code,
+              unit: item.uom,
+              requested,
+              issued,
+              received: initialReceived,
+              itemStatus
+            };
+          });
         setReq({
           id: data.id,
           date: data.requested_date,
@@ -415,7 +425,7 @@ export function ReceiveItems() {
     [items]
   );
 
-  const allActioned = counts.pending === 0;
+  const allActioned = counts.total > 0 && counts.pending === 0;
   const hasIssued = items.some((i) => Number(i.issued) > 0);
   const progress = counts.total === 0 ? 0 : ((counts.total - counts.pending) / counts.total) * 100;
   const pending = items.filter((i) => i.itemStatus === 'Pending');
@@ -522,6 +532,14 @@ export function ReceiveItems() {
       </div>
 
       <div className="body">
+        {counts.total === 0 && (
+          <div className="empty-state">
+            <div className="empty-state-title">Is requisition me requested items nahi hain</div>
+            <div className="empty-state-sub">
+              Yahan sirf wahi lines dikhenge jinka requested quantity `0` se zyada hai.
+            </div>
+          </div>
+        )}
         {pending.length > 0 && (
           <>
             {pending.length < counts.total && (

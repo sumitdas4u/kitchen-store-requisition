@@ -296,21 +296,37 @@ export class RequisitionService {
       from_warehouse: requisition.source_warehouse,
       to_warehouse: requisition.warehouse,
       remarks: `KR-${requisition.id} | ${requisition.warehouse} | ${requisition.requested_date}`,
-      items: items.map((item) => ({
-        item_code: item.item_code,
-        item_name: item.item_name ?? null,
-        qty: Number(item.qty),
-        uom: item.uom ?? null,
-        stock_uom: item.uom ?? null,
-        s_warehouse: requisition.source_warehouse,
-        t_warehouse: requisition.warehouse,
-        conversion_factor: 1,
-        ...(requisition.erp_name ? { material_request: requisition.erp_name } : {}),
-        ...(mrItemMap.get(item.item_code)
-          ? { material_request_item: mrItemMap.get(item.item_code) }
-          : {})
-      }))
+      items: items.map((item) => {
+        const mrItemName = mrItemMap.get(item.item_code)
+        return {
+          item_code: item.item_code,
+          item_name: item.item_name ?? null,
+          qty: Number(item.qty),
+          uom: item.uom ?? null,
+          stock_uom: item.uom ?? null,
+          s_warehouse: requisition.source_warehouse,
+          t_warehouse: requisition.warehouse,
+          conversion_factor: 1,
+          ...(requisition.erp_name && mrItemName
+            ? {
+                material_request: requisition.erp_name,
+                material_request_item: mrItemName
+              }
+            : {})
+        }
+      })
     }
+  }
+
+  private getIssuedStockEntryItems(requisition: Requisition) {
+    return requisition.items
+      .filter((item) => Number(item.issued_qty) > 0)
+      .map((item) => ({
+        item_code: item.item_code,
+        item_name: item.item_name,
+        qty: Number(item.issued_qty),
+        uom: item.uom
+      }))
   }
 
   private getRetryableStockEntryItems(requisition: Requisition) {
@@ -327,6 +343,56 @@ export class RequisitionService {
       }))
   }
 
+  private async syncIssuedStockEntryDraft(
+    requisition: Requisition,
+    requisitionId: number
+  ) {
+    const issuedItems = this.getIssuedStockEntryItems(requisition)
+    if (issuedItems.length === 0) {
+      return
+    }
+
+    try {
+      requisition.company = await this.getEffectiveRequisitionCompany(requisition)
+      const payload = this.buildStockEntryPayload(requisition, issuedItems)
+
+      if (
+        requisition.stock_entry &&
+        requisition.stock_entry_status !== StockEntrySyncStatus.Submitted
+      ) {
+        await this.erpService.updateStockEntryDraft(requisition.stock_entry, payload)
+      } else {
+        requisition.stock_entry = await this.erpService.createStockEntryDraft(
+          payload
+        )
+      }
+
+      this.setStockEntrySyncState(
+        requisition,
+        StockEntrySyncStatus.DraftCreated,
+        null
+      )
+      requisition.erp_synced = true
+      requisition.last_synced_at = new Date()
+      await this.requisitionsRepo.save(requisition)
+    } catch (err: any) {
+      const errorMessage = this.extractErpError(
+        err,
+        'Failed to create Stock Entry draft'
+      )
+      this.setStockEntrySyncState(
+        requisition,
+        StockEntrySyncStatus.Failed,
+        errorMessage
+      )
+      requisition.erp_synced = false
+      await this.requisitionsRepo.save(requisition)
+      this.logger.warn(
+        `Failed to sync Stock Entry draft for requisition ${requisitionId}: ${errorMessage}`
+      )
+    }
+  }
+
   /**
    * Completion keeps the existing ERP behavior:
    * - submit an already-created Stock Entry draft
@@ -334,6 +400,7 @@ export class RequisitionService {
    */
   private async enqueueCompletionSync(requisition: Requisition) {
     if (requisition.stock_entry) {
+      const completionItems = this.getRetryableStockEntryItems(requisition)
       this.setStockEntrySyncState(
         requisition,
         StockEntrySyncStatus.SubmitPending,
@@ -344,7 +411,11 @@ export class RequisitionService {
         action: 'submit_stock_entry',
         payload: {
           name: requisition.stock_entry,
-          requisition_id: requisition.id
+          requisition_id: requisition.id,
+          draft_payload: this.buildStockEntryPayload(
+            requisition,
+            completionItems
+          )
         }
       })
       return
@@ -447,55 +518,99 @@ export class RequisitionService {
    * Enqueue MR creation in ERPNext (async, non-blocking).
    * If ERPNext is down the queue will retry automatically.
    */
-  private async enqueueMaterialRequestCreate(requisition: Requisition) {
-    const mrItems = requisition.items.filter((item) => Number(item.requested_qty) > 0)
-    if (mrItems.length === 0) return // nothing to push to ERPNext
-
-    const mrPayload = await this.buildMaterialRequestPayload(requisition)
-    await this.queueService.enqueueErpWrite('create_material_request', {
-      action: 'create_material_request',
-      payload: {
-        requisition_id: requisition.id,
-        mr_payload: mrPayload
+  private async syncMaterialRequestItemNames(
+    requisition: Requisition,
+    erpName: string
+  ) {
+    try {
+      const mrDoc = await this.erpService.getMaterialRequest(erpName)
+      if (!mrDoc?.items?.length || !requisition.items?.length) {
+        return
       }
-    })
+
+      const localMap = new Map(
+        requisition.items.map((item) => [item.item_code, item])
+      )
+      const updates: RequisitionItem[] = []
+
+      for (const mrItem of mrDoc.items) {
+        const localItem = localMap.get(mrItem.item_code)
+        const mrItemName = (mrItem as { name?: string }).name
+        if (
+          localItem &&
+          mrItemName &&
+          localItem.erp_mr_item_name !== mrItemName
+        ) {
+          localItem.erp_mr_item_name = mrItemName
+          updates.push(localItem)
+        }
+      }
+
+      if (updates.length > 0) {
+        await this.requisitionItemsRepo.save(updates)
+      }
+    } catch (error: any) {
+      this.logger.warn(
+        `Failed to sync MR item names for requisition ${requisition.id}: ${this.extractErpError(error)}`
+      )
+    }
   }
 
   /**
-   * Enqueue MR update in ERPNext (async, non-blocking).
+   * Reuse an existing ERP MR when possible so a requisition only ever maps to
+   * one Material Request in ERPNext.
    */
-  private async enqueueMaterialRequestUpdate(requisition: Requisition) {
-    if (!requisition.erp_name) return // no MR created yet, nothing to update
-
+  private async ensureMaterialRequestDraft(requisition: Requisition) {
     const mrPayload = await this.buildMaterialRequestPayload(requisition)
-    await this.queueService.enqueueErpWrite('update_material_request', {
-      action: 'update_material_request',
-      payload: {
-        requisition_id: requisition.id,
-        erp_name: requisition.erp_name,
-        mr_payload: mrPayload
-      }
-    })
+
+    if (requisition.erp_name) {
+      await this.erpService.updateMaterialRequest(
+        requisition.erp_name,
+        mrPayload
+      )
+      await this.syncMaterialRequestItemNames(
+        requisition,
+        requisition.erp_name
+      )
+      return requisition.erp_name
+    }
+
+    const existingMr = await this.erpService.findMaterialRequestByLocalId(
+      String(requisition.id)
+    )
+    const erpName =
+      existingMr?.name ??
+      (await this.erpService.createMaterialRequestDraft(mrPayload))
+
+    if (existingMr?.name) {
+      await this.erpService.updateMaterialRequest(erpName, mrPayload)
+    }
+
+    requisition.erp_name = erpName
+    requisition.erp_synced = true
+    requisition.last_synced_at = new Date()
+    await this.requisitionsRepo.save(requisition)
+    await this.syncMaterialRequestItemNames(requisition, erpName)
+
+    return erpName
   }
 
   /**
    * Enqueue MR submit in ERPNext (async, non-blocking).
    */
+  /*
   private async enqueueMaterialRequestSubmit(requisition: Requisition) {
-    if (!requisition.erp_name) {
+    const mrItems = requisition.items.filter(
+      (item) => Number(item.requested_qty) > 0
+    )
       // MR not yet created â€” create + submit in one go
       // First create, the processor will set erp_name, then we submit
-      const mrItems = requisition.items.filter((item) => Number(item.requested_qty) > 0)
-      if (mrItems.length === 0) return
+    if (mrItems.length === 0) {
+      return
+    }
 
-      const mrPayload = await this.buildMaterialRequestPayload(requisition)
-      // Try synchronous creation so we can submit immediately
-      try {
-        const erpName = await this.erpService.createMaterialRequestDraft(mrPayload)
-        requisition.erp_name = erpName
-        requisition.erp_synced = true
-        requisition.last_synced_at = new Date()
-        await this.requisitionsRepo.save(requisition)
+    try {
+      const erpName = await this.ensureMaterialRequestDraft(requisition)
 
         // Now submit
         await this.queueService.enqueueErpWrite('submit_material_request', {
@@ -514,16 +629,44 @@ export class RequisitionService {
       return
     }
 
-    await this.queueService.enqueueErpWrite('submit_material_request', {
-      action: 'submit_material_request',
-      payload: {
-        requisition_id: requisition.id,
-        erp_name: requisition.erp_name
-      }
-    })
+    } catch (err: any) {
+      this.logger.warn(
+        `Failed to create or reuse MR for requisition ${requisition.id}: ${this.extractErpError(err)}`
+      )
+      requisition.erp_synced = false
+      await this.requisitionsRepo.save(requisition)
+    }
   }
 
   // â”€â”€ CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  */
+
+  private async enqueueMaterialRequestSubmit(requisition: Requisition) {
+    const mrItems = requisition.items.filter(
+      (item) => Number(item.requested_qty) > 0
+    )
+    if (mrItems.length === 0) {
+      return
+    }
+
+    try {
+      const erpName = await this.ensureMaterialRequestDraft(requisition)
+      await this.queueService.enqueueErpWrite('submit_material_request', {
+        action: 'submit_material_request',
+        payload: {
+          requisition_id: requisition.id,
+          erp_name: erpName
+        }
+      })
+    } catch (err: any) {
+      this.logger.warn(
+        `Failed to create or reuse MR for requisition ${requisition.id}: ${this.extractErpError(err)}`
+      )
+      requisition.erp_synced = false
+      await this.requisitionsRepo.save(requisition)
+    }
+  }
 
   async createDraft(
     user: {
@@ -558,12 +701,7 @@ export class RequisitionService {
       items: items as RequisitionItem[]
     })
 
-    const saved = await this.requisitionsRepo.save(requisition)
-
-    // Async: create Material Request draft in ERPNext
-    await this.enqueueMaterialRequestCreate(saved)
-
-    return saved
+    return this.requisitionsRepo.save(requisition)
   }
 
   async updateDraft(requisitionId: number, dto: CreateRequisitionDto) {
@@ -578,16 +716,7 @@ export class RequisitionService {
     requisition.shift = dto.shift
     requisition.notes = dto.notes ?? null
     requisition.erp_synced = false
-    const saved = await this.requisitionsRepo.save(requisition)
-
-    // Async: update or create MR in ERPNext
-    if (saved.erp_name) {
-      await this.enqueueMaterialRequestUpdate(saved)
-    } else {
-      await this.enqueueMaterialRequestCreate(saved)
-    }
-
-    return saved
+    return this.requisitionsRepo.save(requisition)
   }
 
   async deleteDraft(requisitionId: number) {
@@ -770,6 +899,12 @@ export class RequisitionService {
     }
     await this.requisitionsRepo.save(requisition)
     await this.requisitionItemsRepo.save(requisition.items)
+
+    if (issuedItems.length > 0) {
+      await this.syncIssuedStockEntryDraft(requisition, requisitionId)
+      await this.notifyIfStatusChanged(requisitionId, changed, newStatus)
+      return { ok: true, status: newStatus }
+    }
 
     // Create Stock Entry (Material Transfer) in ERPNext for the issued items
     // Link each SE item to the Material Request via material_request + material_request_item
@@ -1110,18 +1245,25 @@ export class RequisitionService {
         from_warehouse: user.source_warehouse,
         to_warehouse: dto.target_warehouse,
         remarks: `KR-${saved.id} | ${dto.target_warehouse} | ${today}`,
-        items: dto.items.map((item) => ({
-          item_code: item.item_code,
-          item_name: item.item_name ?? null,
-          qty: Number(item.qty),
-          uom: item.uom ?? null,
-          stock_uom: item.uom ?? null,
-          s_warehouse: user.source_warehouse,
-          t_warehouse: dto.target_warehouse,
-          conversion_factor: 1,
-          material_request: mrName,
-          ...(mrItemNameMap.get(item.item_code) ? { material_request_item: mrItemNameMap.get(item.item_code) } : {})
-        }))
+        items: dto.items.map((item) => {
+          const mrItemName = mrItemNameMap.get(item.item_code)
+          return {
+            item_code: item.item_code,
+            item_name: item.item_name ?? null,
+            qty: Number(item.qty),
+            uom: item.uom ?? null,
+            stock_uom: item.uom ?? null,
+            s_warehouse: user.source_warehouse,
+            t_warehouse: dto.target_warehouse,
+            conversion_factor: 1,
+            ...(mrItemName
+              ? {
+                  material_request: mrName,
+                  material_request_item: mrItemName
+                }
+              : {})
+          }
+        })
       }
       erpDraft = await this.erpService.createStockEntryDraft(sePayload)
       saved.stock_entry = erpDraft
@@ -1172,6 +1314,12 @@ export class RequisitionService {
       requisition.company = await this.getEffectiveRequisitionCompany(requisition)
 
       if (requisition.stock_entry) {
+        if (requisition.status === RequisitionStatus.Completed) {
+          await this.erpService.updateStockEntryDraft(
+            requisition.stock_entry,
+            this.buildStockEntryPayload(requisition, retryItems)
+          )
+        }
         this.setStockEntrySyncState(
           requisition,
           StockEntrySyncStatus.SubmitPending,
