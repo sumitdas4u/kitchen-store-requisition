@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { apiRequest } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
@@ -179,6 +179,7 @@ export function StoreDashboard() {
   const token          = useAuthGuard('/store/login');
   const [reqs,   setReqs  ] = useState<any[]>([]);
   const [vendorItems, setVendorItems] = useState<VendorSummaryItem[]>([]);
+  const [showShortageOnly, setShowShortageOnly] = useState(false);
   const [time,   setTime  ] = useState(nowTime());
   const [loading,setLoading] = useState(true);
 
@@ -213,8 +214,12 @@ export function StoreDashboard() {
   // Status values are Title Case: 'Submitted', 'Partially Issued', 'Issued', 'Completed'
   const pending    = reqs.filter(r => r.status === 'Submitted' || r.status === 'Partially Issued');
   const totalItems = reqs.reduce((s, r) => s + (r.items?.length ?? 0), 0);
+  const visibleVendorItems = useMemo(
+    () => showShortageOnly ? vendorItems.filter(item => item.shortfallQty > 0) : vendorItems,
+    [showShortageOnly, vendorItems],
+  );
   const vendorWarehouseCount = new Set(
-    vendorItems.flatMap(item => summarizeSources(item.requestSources).map(source => source.warehouse))
+    visibleVendorItems.flatMap(item => summarizeSources(item.requestSources).map(source => source.warehouse))
   ).size;
 
   return (
@@ -287,32 +292,49 @@ export function StoreDashboard() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
             <div>
               <div style={{ fontSize: 14, fontWeight: 900, color: 'var(--dk)' }}>
-                {vendorItems.length} aggregated items
+                {visibleVendorItems.length} {showShortageOnly ? 'shortage' : 'aggregated'} items
               </div>
               <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--lt)', marginTop: 2 }}>
                 {vendorWarehouseCount} warehouses contributing to vendor demand
               </div>
             </div>
-            <button
-              onClick={() => router.push('/store/vendor-orders')}
-              style={{
-                border: 'none',
-                borderRadius: 10,
-                background: 'var(--or)',
-                color: '#fff',
-                padding: '10px 12px',
-                fontSize: 12,
-                fontWeight: 900,
-                cursor: 'pointer',
-                flexShrink: 0,
-              }}>
-              Create Order
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <button
+                onClick={() => setShowShortageOnly(current => !current)}
+                style={{
+                  border: `1.5px solid ${showShortageOnly ? 'var(--rd)' : 'var(--ln)'}`,
+                  borderRadius: 999,
+                  background: showShortageOnly ? 'var(--rdbg)' : '#fff',
+                  color: showShortageOnly ? 'var(--rd)' : 'var(--md)',
+                  padding: '8px 10px',
+                  fontSize: 11,
+                  fontWeight: 900,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                }}>
+                {showShortageOnly ? 'Shortage only' : 'All requests'}
+              </button>
+              <button
+                onClick={() => router.push('/store/vendor-orders')}
+                style={{
+                  border: 'none',
+                  borderRadius: 10,
+                  background: 'var(--or)',
+                  color: '#fff',
+                  padding: '10px 12px',
+                  fontSize: 12,
+                  fontWeight: 900,
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}>
+                Create Order
+              </button>
+            </div>
           </div>
 
-          {vendorItems.length > 0 ? (
+          {visibleVendorItems.length > 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {vendorItems.slice(0, 5).map(item => (
+              {visibleVendorItems.slice(0, 5).map(item => (
                 <div
                   key={item.itemCode}
                   style={{
@@ -353,8 +375,12 @@ export function StoreDashboard() {
             </div>
           ) : (
             <div style={{ textAlign: 'center', padding: '18px 12px', color: 'var(--lt)' }}>
-              <div style={{ fontSize: 14, fontWeight: 800 }}>No vendor-order items waiting</div>
-              <div style={{ fontSize: 12, fontWeight: 700, marginTop: 4 }}>Warehouse request totals will appear here</div>
+              <div style={{ fontSize: 14, fontWeight: 800 }}>
+                {showShortageOnly ? 'No shortage items right now' : 'No vendor-order items waiting'}
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 700, marginTop: 4 }}>
+                {showShortageOnly ? 'Turn off the filter to see all requested items' : 'Warehouse request totals will appear here'}
+              </div>
             </div>
           )}
         </div>

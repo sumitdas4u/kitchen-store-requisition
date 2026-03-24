@@ -521,16 +521,65 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);-webkit-font-smoothing
 interface ItemRowState {
   vendorId:    string;
   price:       number;
+  orderQty:    number;
   showOther:   boolean;
   otherSearch: string;
 }
 
-function ShortageTab({ items, cart, vendorMap, onAdd, onRemove, onChangeVendor, onRateChange, loading, error }: {
+function normalizeOrderQty(value: number) {
+  if (!Number.isFinite(value)) return 0.5;
+  return Math.max(0.5, n3(value));
+}
+
+function InlineQtyField({ value, unit, onChange }: {
+  value: number;
+  unit: string;
+  onChange: (qty: number) => void;
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+      <div className="qty-ctrl" style={{ height: 30 }}>
+        <button
+          className="qty-btn"
+          style={{ width: 28, minWidth: 28, height: 30, fontSize: 16 }}
+          onPointerDown={e => {
+            e.preventDefault();
+            onChange(normalizeOrderQty(value - 0.5));
+          }}>
+          -
+        </button>
+        <input
+          className="qty-inp"
+          style={{ width: 44, height: 30, fontSize: 12 }}
+          type="number"
+          inputMode="decimal"
+          step="any"
+          value={value}
+          onChange={e => onChange(normalizeOrderQty(parseFloat(e.target.value) || 0))}
+          onFocus={e => e.target.select()}
+        />
+        <button
+          className="qty-btn add"
+          style={{ width: 28, minWidth: 28, height: 30, fontSize: 16 }}
+          onPointerDown={e => {
+            e.preventDefault();
+            onChange(normalizeOrderQty(value + 0.5));
+          }}>
+          +
+        </button>
+      </div>
+      <span style={{ fontSize: 10, fontWeight: 800, color: '#9CA3AF', flexShrink: 0 }}>{unit}</span>
+    </div>
+  );
+}
+
+function ShortageTab({ items, cart, vendorMap, onAdd, onRemove, onQtyChange, onChangeVendor, onRateChange, loading, error }: {
   items:          CatalogItem[];
   cart:           CartLine[];
   vendorMap:      Map<string, Vendor>;
-  onAdd:          (item: CatalogItem, vendorId?: string, price?: number) => void;
+  onAdd:          (item: CatalogItem, vendorId?: string, price?: number, qty?: number) => void;
   onRemove:       (itemCode: string) => void;
+  onQtyChange:    (itemCode: string, qty: number) => void;
   onChangeVendor: (itemCode: string, vendorId: string) => void;
   onRateChange:   (itemCode: string, rate: number) => void;
   loading:        boolean;
@@ -552,12 +601,14 @@ function ShortageTab({ items, cart, vendorMap, onAdd, onRemove, onChangeVendor, 
             ...(next[item.itemCode] ?? { showOther: false, otherSearch: '' }),
             vendorId:  cartLine.vendorId,
             price:     cartLine.rate,
+            orderQty:  cartLine.qty,
             showOther: false,
           };
         } else if (!next[item.itemCode]) {
           next[item.itemCode] = {
             vendorId:    item.autoVendorId,
             price:       item.lastRate,
+            orderQty:    normalizeOrderQty(item.defaultOrderQty > 0 ? item.defaultOrderQty : 1),
             showOther:   false,
             otherSearch: '',
           };
@@ -568,7 +619,7 @@ function ShortageTab({ items, cart, vendorMap, onAdd, onRemove, onChangeVendor, 
   }, [shortages, cart]);
 
   const getState = (code: string): ItemRowState =>
-    rowStates[code] ?? { vendorId: '', price: 0, showOther: false, otherSearch: '' };
+    rowStates[code] ?? { vendorId: '', price: 0, orderQty: 1, showOther: false, otherSearch: '' };
 
   const patchState = (code: string, patch: Partial<ItemRowState>) =>
     setRowStates(prev => ({ ...prev, [code]: { ...getState(code), ...patch } }));
@@ -687,7 +738,7 @@ function ShortageTab({ items, cart, vendorMap, onAdd, onRemove, onChangeVendor, 
                           if (added) { onRemove(item.itemCode); return; }
                           if (!rs.vendorId) { alert('Please select a vendor first'); return; }
                           if (!rs.price || rs.price <= 0) { alert('Please enter a price'); return; }
-                          onAdd(item, rs.vendorId, rs.price);
+                          onAdd(item, rs.vendorId, rs.price, rs.orderQty);
                         }}>
                         {added ? '✓' : '+'}
                       </button>
@@ -695,6 +746,14 @@ function ShortageTab({ items, cart, vendorMap, onAdd, onRemove, onChangeVendor, 
 
                     {/* Controls row: vendor select + price — always visible */}
                     <div className="sr-controls" onClick={e => e.stopPropagation()}>
+                      <InlineQtyField
+                        value={rs.orderQty}
+                        unit={item.unit}
+                        onChange={qty => {
+                          patchState(item.itemCode, { orderQty: qty });
+                          if (added) onQtyChange(item.itemCode, qty);
+                        }}
+                      />
                       {/* Vendor select */}
                       <select
                         className="sr-vendor-sel"
@@ -789,13 +848,14 @@ function ShortageTab({ items, cart, vendorMap, onAdd, onRemove, onChangeVendor, 
 
 // ─── AddItemsTab ──────────────────────────────────────────────────────────────
 
-function AddItemsTab({ shortageItems, cart, vendorMap, token, onAdd, onRemove, onChangeVendor }: {
+function AddItemsTab({ shortageItems, cart, vendorMap, token, onAdd, onRemove, onQtyChange, onChangeVendor }: {
   shortageItems:  CatalogItem[];
   cart:           CartLine[];
   vendorMap:      Map<string, Vendor>;
   token:          string;
-  onAdd:          (item: CatalogItem, vendorId?: string, price?: number) => void;
+  onAdd:          (item: CatalogItem, vendorId?: string, price?: number, qty?: number) => void;
   onRemove:       (itemCode: string) => void;
+  onQtyChange:    (itemCode: string, qty: number) => void;
   onChangeVendor: (itemCode: string, vendorId: string) => void;
 }) {
   const [search,    setSearch   ] = useState('');
@@ -805,7 +865,7 @@ function AddItemsTab({ shortageItems, cart, vendorMap, token, onAdd, onRemove, o
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const getAS = (code: string): ItemRowState =>
-    addStates[code] ?? { vendorId: '', price: 0, showOther: false, otherSearch: '' };
+    addStates[code] ?? { vendorId: '', price: 0, orderQty: 1, showOther: false, otherSearch: '' };
 
   const patchAS = (code: string, patch: Partial<ItemRowState>) =>
     setAddStates(prev => ({ ...prev, [code]: { ...getAS(code), ...patch } }));
@@ -839,10 +899,22 @@ function AddItemsTab({ shortageItems, cart, vendorMap, token, onAdd, onRemove, o
       const next = { ...prev };
       items.forEach(item => {
         const cartLine = cart.find(l => l.itemCode === item.itemCode);
-        if (cartLine && !next[item.itemCode]) {
-          next[item.itemCode] = { vendorId: cartLine.vendorId, price: cartLine.rate, showOther: false, otherSearch: '' };
+        if (cartLine) {
+          next[item.itemCode] = {
+            ...(next[item.itemCode] ?? { showOther: false, otherSearch: '' }),
+            vendorId: cartLine.vendorId,
+            price: cartLine.rate,
+            orderQty: cartLine.qty,
+            showOther: false,
+          };
         } else if (!next[item.itemCode]) {
-          next[item.itemCode] = { vendorId: item.autoVendorId, price: item.lastRate, showOther: false, otherSearch: '' };
+          next[item.itemCode] = {
+            vendorId: item.autoVendorId,
+            price: item.lastRate,
+            orderQty: normalizeOrderQty(item.defaultOrderQty > 0 ? item.defaultOrderQty : 1),
+            showOther: false,
+            otherSearch: '',
+          };
         }
       });
       return next;
@@ -911,7 +983,7 @@ function AddItemsTab({ shortageItems, cart, vendorMap, token, onAdd, onRemove, o
                         if (added) { onRemove(item.itemCode); return; }
                         if (!as.vendorId) { alert('Please select a vendor first'); return; }
                         if (!as.price || as.price <= 0) { alert('Please enter a price'); return; }
-                        onAdd(item, as.vendorId, as.price);
+                        onAdd(item, as.vendorId, as.price, as.orderQty);
                       }}>
                       {added ? '✓' : '+'}
                     </button>
@@ -919,6 +991,14 @@ function AddItemsTab({ shortageItems, cart, vendorMap, token, onAdd, onRemove, o
 
                   {/* Inline vendor + price controls */}
                   <div className="sr-controls" style={{ marginTop: 6 }} onClick={e => e.stopPropagation()}>
+                    <InlineQtyField
+                      value={as.orderQty}
+                      unit={item.unit}
+                      onChange={qty => {
+                        patchAS(item.itemCode, { orderQty: qty });
+                        if (added) onQtyChange(item.itemCode, qty);
+                      }}
+                    />
                     <select
                       className="sr-vendor-sel"
                       value={as.showOther ? '__other__' : (as.vendorId || '__none__')}
@@ -1027,17 +1107,16 @@ function CartTab({ cart, vendorMap, shortageItems, token, onQtyChange, onRemove,
   // Sync lineStates from cart — keep entries for current cart items, drop stale ones
   useEffect(() => {
     setLineStates(prev => {
-      const cartCodes = new Set(cart.map(l => l.itemCode));
       const next: Record<string, ItemRowState> = {};
       cart.forEach(line => {
-        next[line.itemCode] = prev[line.itemCode] ?? { vendorId: line.vendorId, price: line.rate, showOther: false, otherSearch: '' };
+        next[line.itemCode] = prev[line.itemCode] ?? { vendorId: line.vendorId, price: line.rate, orderQty: line.qty, showOther: false, otherSearch: '' };
       });
       return next;
     });
   }, [cart]);
 
   const getLS = (code: string): ItemRowState =>
-    lineStates[code] ?? { vendorId: '', price: 0, showOther: false, otherSearch: '' };
+    lineStates[code] ?? { vendorId: '', price: 0, orderQty: 1, showOther: false, otherSearch: '' };
 
   const patchLS = (code: string, patch: Partial<ItemRowState>) =>
     setLineStates(prev => ({ ...prev, [code]: { ...getLS(code), ...patch } }));
@@ -1972,7 +2051,7 @@ export default function VendorOrderPage() {
   }, [tab, token]);
 
   // Cart handlers
-  const handleAdd = useCallback((item: CatalogItem, overrideVendorId?: string, overridePrice?: number) => {
+  const handleAdd = useCallback((item: CatalogItem, overrideVendorId?: string, overridePrice?: number, overrideQty?: number) => {
     setCart(prev => {
       if (prev.find(l => l.itemCode === item.itemCode)) return prev;
       const vendorId = overrideVendorId ?? item.autoVendorId;
@@ -1981,7 +2060,7 @@ export default function VendorOrderPage() {
         itemCode:     item.itemCode,
         name:         item.name,
         unit:         item.unit,
-        qty:          item.defaultOrderQty > 0 ? item.defaultOrderQty : 1,
+        qty:          normalizeOrderQty(overrideQty ?? (item.defaultOrderQty > 0 ? item.defaultOrderQty : 1)),
         rate:         overridePrice ?? vEntry?.rate ?? item.lastRate,
         vendorId:     vendorId || '',
         isManual:     item.requestSources.length === 0,
@@ -1999,7 +2078,7 @@ export default function VendorOrderPage() {
 
   const handleQtyChange = useCallback((itemCode: string, qty: number) => {
     setCart(prev => prev.map(l =>
-      l.itemCode === itemCode ? { ...l, qty: Math.max(0.5, n3(qty)) } : l
+      l.itemCode === itemCode ? { ...l, qty: normalizeOrderQty(qty) } : l
     ));
   }, []);
 
@@ -2135,6 +2214,7 @@ export default function VendorOrderPage() {
             vendorMap={vendorMap}
             onAdd={handleAdd}
             onRemove={handleRemove}
+            onQtyChange={handleQtyChange}
             onChangeVendor={handleChangeVendor}
             onRateChange={handleRateChange}
             loading={loadingShortage}
@@ -2149,6 +2229,7 @@ export default function VendorOrderPage() {
             token={token}
             onAdd={handleAdd}
             onRemove={handleRemove}
+            onQtyChange={handleQtyChange}
             onChangeVendor={handleChangeVendor}
           />
         )}
