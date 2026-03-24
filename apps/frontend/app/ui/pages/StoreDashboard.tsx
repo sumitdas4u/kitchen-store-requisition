@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { apiRequest } from '../../../lib/api';
 import { useAuthGuard } from '../../../lib/auth';
@@ -214,10 +214,9 @@ export function StoreDashboard() {
   // Status values are Title Case: 'Submitted', 'Partially Issued', 'Issued', 'Completed'
   const pending    = reqs.filter(r => r.status === 'Submitted' || r.status === 'Partially Issued');
   const totalItems = reqs.reduce((s, r) => s + (r.items?.length ?? 0), 0);
-  const visibleVendorItems = useMemo(
-    () => showShortageOnly ? vendorItems.filter(item => item.shortfallQty > 0) : vendorItems,
-    [showShortageOnly, vendorItems],
-  );
+  const visibleVendorItems = showShortageOnly
+    ? vendorItems.filter(item => item.shortfallQty > 0)
+    : vendorItems;
   const vendorWarehouseCount = new Set(
     visibleVendorItems.flatMap(item => summarizeSources(item.requestSources).map(source => source.warehouse))
   ).size;
